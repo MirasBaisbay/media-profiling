@@ -1,263 +1,834 @@
 """
 train_pipeline.py
-End-to-End Pipeline Training for Propaganda Detection
-1. Downloads SemEval-2020 Task 11 Data from Hugging Face
-2. Trains DeBERTa-v3-base for Span Identification (SI)
-3. Trains DeBERTa-v3-base for Technique Classification (TC)
+End-to-End Pipeline Training for Propaganda Detection (SemEval 2020 Task 11)
+
+This script loads the local PTC (Propaganda Techniques Corpus) dataset and trains:
+1. Span Identification (SI): Token classification with BIO tagging to find WHERE propaganda is
+2. Technique Classification (TC): Sequence classification to identify WHICH technique is used
+
+Dataset Structure Expected:
+    datasets/
+    ├── train/
+    │   ├── articles/
+    │   │   ├── article111111111.txt
+    │   │   └── ...
+    │   └── labels/
+    │       ├── article111111111.task-flc-tc.labels
+    │       └── ...
+    ├── dev/
+    │   ├── articles/
+    │   └── labels/
+    └── test/
+        ├── articles/
+        └── labels/
+
+Label File Format (tab-separated):
+    Article_ID    Technique_Label    Start_Offset    End_Offset
 """
 
 import os
+import re
+import glob
+from collections import defaultdict
+from typing import Dict, List, Tuple, Optional
+
 import numpy as np
 import torch
-from datasets import load_dataset, Dataset
+from datasets import Dataset, DatasetDict
 from transformers import (
-    AutoTokenizer, 
-    AutoModelForTokenClassification, 
+    AutoTokenizer,
+    AutoModelForTokenClassification,
     AutoModelForSequenceClassification,
-    TrainingArguments, 
+    TrainingArguments,
     Trainer,
     DataCollatorForTokenClassification,
-    EarlyStoppingCallback
+    EarlyStoppingCallback,
+)
+from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+import logging
+
+from config import (
+    PROPAGANDA_TECHNIQUES,
+    LABEL2ID,
+    ID2LABEL,
+    SI_LABELS,
+    SI_LABEL2ID,
+    SI_ID2LABEL,
+    LEGACY_LABEL_MAPPING,
+    EXCLUDED_LABELS,
+    DATASET_DIR,
+    TRAIN_DIR,
+    DEV_DIR,
+    TEST_DIR,
+    ModelConfig,
+    TrainingConfig,
 )
 
-# --- CONFIGURATION ---
-# We use DeBERTa-v3-base because it outperforms RoBERTa on semantic tasks
-MODEL_CHECKPOINT = "microsoft/deberta-v3-base" 
-OUTPUT_DIR = "./propaganda_models"
-SI_MODEL_DIR = f"{OUTPUT_DIR}/si_model"
-TC_MODEL_DIR = f"{OUTPUT_DIR}/tc_model"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# The official 14 SemEval Labels (mapped to IDs)
-# Note: The HF dataset might return integers, we map them to these names
-TECHNIQUE_LABELS = [
-    "Appeal_to_Authority",
-    "Appeal_to_fear-prejudice",
-    "Bandwagon",
-    "Black-and-White_Fallacy",
-    "Causal_Oversimplification",
-    "Doubt",
-    "Exaggeration,Minimisation",
-    "Flag-Waving",
-    "Loaded_Language",
-    "Name_Calling,Labeling",
-    "Obfuscation,Intentional_Vagueness,Confusion",
-    "Red_Herring",
-    "Reductio_ad_hitlerum",
-    "Repetition",
-    "Slogans",
-    "Straw_Man",
-    "Thought-terminating_Cliche",
-    "Whataboutism" 
-]
-# Create mappings
-label2id = {label: i for i, label in enumerate(TECHNIQUE_LABELS)}
-id2label = {i: label for i, label in enumerate(TECHNIQUE_LABELS)}
+# Initialize configs
+model_config = ModelConfig()
+training_config = TrainingConfig()
 
-# ==============================================================================
-# 1. DATA PREPARATION HELPERS
-# ==============================================================================
 
-def prepare_si_dataset(example, tokenizer):
+# =============================================================================
+# 1. LOCAL DATA LOADING
+# =============================================================================
+
+def find_article_files(data_dir: str) -> Dict[str, Dict[str, str]]:
     """
-    Converts Character Offsets -> Token Labels (BIO Scheme)
-    0 = Outside (O)
-    1 = Begin Propaganda (B-PROP)
-    2 = Inside Propaganda (I-PROP)
-    """
-    text = example["text"]
-    spans = example["span_identification"]
-    
-    # Tokenize (keep offsets mapping)
-    tokenized = tokenizer(
-        text, 
-        truncation=True, 
-        max_length=512, 
-        return_offsets_mapping=True,
-        padding="max_length"
-    )
-    
-    offset_mapping = tokenized["offset_mapping"]
-    sequence_labels = []
-    
-    # Create a mask of "Propaganda Characters" (1 for prop, 0 for clean)
-    char_mask = np.zeros(len(text), dtype=int)
-    for start, end in zip(spans["start_char_offset"], spans["end_char_offset"]):
-        char_mask[start:end] = 1
+    Finds all article text files and their corresponding label files.
 
-    # Map Characters -> Tokens
-    for idx, (start, end) in enumerate(offset_mapping):
-        # Special tokens (CLS, SEP, PAD) have (0,0) or equivalent
-        if start == end:
-            sequence_labels.append(-100) # Ignore in loss
+    Handles multiple possible directory structures:
+    - Flat: all files in same directory
+    - Nested: articles/ and labels/ subdirectories
+    - Mixed: labels in parallel folder
+
+    Args:
+        data_dir: Path to the data split directory (train/dev/test)
+
+    Returns:
+        Dict mapping article_id to {"text_path": ..., "label_path": ...}
+    """
+    article_files = {}
+
+    # Find all .txt files (article content)
+    txt_patterns = [
+        os.path.join(data_dir, "*.txt"),
+        os.path.join(data_dir, "articles", "*.txt"),
+        os.path.join(data_dir, "**", "*.txt"),
+    ]
+
+    txt_files = []
+    for pattern in txt_patterns:
+        txt_files.extend(glob.glob(pattern, recursive=True))
+    txt_files = list(set(txt_files))  # Remove duplicates
+
+    for txt_path in txt_files:
+        # Extract article ID from filename (e.g., "article111111111.txt" -> "111111111")
+        basename = os.path.basename(txt_path)
+        match = re.match(r"article(\d+)\.txt", basename)
+        if not match:
             continue
-            
-        # Check if this token falls inside a propaganda span
-        # We consider a token "Propaganda" if >50% of its chars are marked
-        token_chars = char_mask[start:end]
-        if np.mean(token_chars) > 0.5:
-            # Simple Binary Classification for SI (Propaganda vs Not)
-            # You could do B-tag logic, but for detection I-tag (1) is sufficient usually
-            sequence_labels.append(1) 
+        article_id = match.group(1)
+
+        # Look for corresponding label file in multiple locations
+        label_filename = f"article{article_id}.task-flc-tc.labels"
+        possible_label_paths = [
+            # Same directory as article
+            os.path.join(os.path.dirname(txt_path), label_filename),
+            # Parallel labels/ directory
+            os.path.join(data_dir, "labels", label_filename),
+            # Labels in parent's labels/ directory
+            os.path.join(os.path.dirname(os.path.dirname(txt_path)), "labels", label_filename),
+            # Ground truth directory (common in SemEval)
+            os.path.join(data_dir, "ground-truth", label_filename),
+            os.path.join(data_dir, "propaganda-techniques-annotations", label_filename),
+        ]
+
+        label_path = None
+        for lp in possible_label_paths:
+            if os.path.exists(lp):
+                label_path = lp
+                break
+
+        article_files[article_id] = {
+            "text_path": txt_path,
+            "label_path": label_path,  # May be None if no labels (e.g., test set)
+        }
+
+    return article_files
+
+
+def parse_label_file(label_path: str) -> List[Dict]:
+    """
+    Parses a .labels file with tab-separated columns:
+    Article_ID, Technique_Label, Start_Offset, End_Offset
+
+    Args:
+        label_path: Path to the .labels file
+
+    Returns:
+        List of dicts with keys: technique, start, end
+    """
+    labels = []
+
+    if not label_path or not os.path.exists(label_path):
+        return labels
+
+    with open(label_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split("\t")
+            if len(parts) < 4:
+                continue
+
+            article_id, technique, start, end = parts[:4]
+
+            # Skip excluded labels (V2)
+            if technique in EXCLUDED_LABELS:
+                continue
+
+            # Map legacy labels to V2 merged labels
+            technique = LEGACY_LABEL_MAPPING.get(technique, technique)
+
+            # Skip if technique is not in our final label set
+            if technique not in LABEL2ID:
+                logger.warning(f"Unknown technique '{technique}' in {label_path}, skipping")
+                continue
+
+            labels.append({
+                "technique": technique,
+                "start": int(start),
+                "end": int(end),
+            })
+
+    return labels
+
+
+def load_local_ptc_data(data_dir: str) -> List[Dict]:
+    """
+    Loads all articles and labels from a local PTC data directory.
+
+    Args:
+        data_dir: Path to the data split directory (e.g., datasets/train)
+
+    Returns:
+        List of dicts, each containing:
+        - article_id: str
+        - text: str (full article text)
+        - labels: List[Dict] with keys: technique, start, end
+    """
+    if not os.path.exists(data_dir):
+        logger.warning(f"Data directory not found: {data_dir}")
+        return []
+
+    article_files = find_article_files(data_dir)
+    logger.info(f"Found {len(article_files)} articles in {data_dir}")
+
+    data = []
+    for article_id, paths in article_files.items():
+        text_path = paths["text_path"]
+        label_path = paths["label_path"]
+
+        # Read article text
+        with open(text_path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        # Parse labels
+        labels = parse_label_file(label_path)
+
+        data.append({
+            "article_id": article_id,
+            "text": text,
+            "labels": labels,
+        })
+
+    logger.info(f"Loaded {len(data)} articles with {sum(len(d['labels']) for d in data)} total spans")
+    return data
+
+
+def load_all_splits() -> Dict[str, List[Dict]]:
+    """
+    Loads train, dev, and test splits from the datasets directory.
+
+    Returns:
+        Dict with keys 'train', 'validation', 'test' mapping to lists of article dicts
+    """
+    splits = {}
+
+    # Try multiple possible directory names
+    train_dirs = [TRAIN_DIR, os.path.join(DATASET_DIR, "training")]
+    dev_dirs = [DEV_DIR, os.path.join(DATASET_DIR, "validation"), os.path.join(DATASET_DIR, "dev-labels")]
+    test_dirs = [TEST_DIR, os.path.join(DATASET_DIR, "test-articles")]
+
+    for dirs, split_name in [(train_dirs, "train"), (dev_dirs, "validation"), (test_dirs, "test")]:
+        for d in dirs:
+            if os.path.exists(d):
+                splits[split_name] = load_local_ptc_data(d)
+                break
+        if split_name not in splits:
+            splits[split_name] = []
+            logger.warning(f"No data found for {split_name} split")
+
+    return splits
+
+
+# =============================================================================
+# 2. SPAN IDENTIFICATION (SI) - BIO TAGGING
+# =============================================================================
+
+def create_char_labels(text: str, labels: List[Dict]) -> np.ndarray:
+    """
+    Creates a character-level label array marking propaganda spans.
+
+    Args:
+        text: Article text
+        labels: List of span annotations
+
+    Returns:
+        numpy array of shape (len(text),) with values:
+        - 0: Outside (O)
+        - 1: Beginning of span (B-PROP)
+        - 2: Inside span (I-PROP)
+    """
+    char_labels = np.zeros(len(text), dtype=np.int32)
+
+    for label in labels:
+        start, end = label["start"], label["end"]
+        # Ensure bounds are valid
+        start = max(0, min(start, len(text)))
+        end = max(0, min(end, len(text)))
+
+        if start < end:
+            char_labels[start] = 1  # B-PROP
+            if end > start + 1:
+                char_labels[start + 1:end] = 2  # I-PROP
+
+    return char_labels
+
+
+def prepare_si_example(
+    text: str,
+    labels: List[Dict],
+    tokenizer,
+    max_length: int = 512
+) -> Dict:
+    """
+    Prepares a single example for Span Identification training.
+
+    Converts character-level annotations to token-level BIO labels using
+    the tokenizer's offset_mapping feature.
+
+    Args:
+        text: Article text
+        labels: List of span annotations
+        tokenizer: HuggingFace tokenizer
+        max_length: Maximum sequence length
+
+    Returns:
+        Dict with input_ids, attention_mask, and labels for token classification
+    """
+    # Tokenize with offset mapping
+    tokenized = tokenizer(
+        text,
+        truncation=True,
+        max_length=max_length,
+        padding="max_length",
+        return_offsets_mapping=True,
+        return_tensors=None,
+    )
+
+    # Create character-level labels
+    char_labels = create_char_labels(text, labels)
+
+    # Map character labels to token labels
+    offset_mapping = tokenized["offset_mapping"]
+    token_labels = []
+
+    prev_was_prop = False  # Track if previous token was propaganda
+
+    for idx, (start, end) in enumerate(offset_mapping):
+        # Special tokens (CLS, SEP, PAD) have (0, 0)
+        if start == end:
+            token_labels.append(-100)  # Ignore in loss computation
+            prev_was_prop = False
+            continue
+
+        # Get character labels for this token's span
+        token_char_labels = char_labels[start:end]
+
+        if len(token_char_labels) == 0:
+            token_labels.append(0)  # O
+            prev_was_prop = False
+            continue
+
+        # Determine token label based on character labels
+        # If any char is labeled as propaganda, token is propaganda
+        if np.any(token_char_labels > 0):
+            # Check if this is start of a new span
+            if token_char_labels[0] == 1 or not prev_was_prop:
+                token_labels.append(1)  # B-PROP
+            else:
+                token_labels.append(2)  # I-PROP
+            prev_was_prop = True
         else:
-            sequence_labels.append(0)
-            
-    tokenized["labels"] = sequence_labels
+            token_labels.append(0)  # O
+            prev_was_prop = False
+
+    tokenized["labels"] = token_labels
+
+    # Remove offset_mapping as it's not needed for training
+    del tokenized["offset_mapping"]
+
     return tokenized
 
-def prepare_tc_dataset(example):
+
+def create_si_dataset(data: List[Dict], tokenizer, max_length: int = 512) -> Dataset:
     """
-    Extracts Spans -> Classification Examples
-    Returns a list of dicts {text, label}
+    Creates a HuggingFace Dataset for Span Identification training.
+
+    Args:
+        data: List of article dicts from load_local_ptc_data
+        tokenizer: HuggingFace tokenizer
+        max_length: Maximum sequence length
+
+    Returns:
+        HuggingFace Dataset ready for training
     """
-    text = example["text"]
-    tc_data = example["technique_classification"]
-    
-    new_examples = []
-    
-    for start, end, label_id in zip(tc_data["start_char_offset"], tc_data["end_char_offset"], tc_data["technique"]):
-        # Extract the snippet
+    processed = []
+
+    for article in data:
+        example = prepare_si_example(
+            article["text"],
+            article["labels"],
+            tokenizer,
+            max_length
+        )
+        example["article_id"] = article["article_id"]
+        processed.append(example)
+
+    return Dataset.from_list(processed)
+
+
+# =============================================================================
+# 3. TECHNIQUE CLASSIFICATION (TC)
+# =============================================================================
+
+def prepare_tc_examples(
+    text: str,
+    labels: List[Dict],
+    article_id: str,
+    context_window: int = 100
+) -> List[Dict]:
+    """
+    Prepares training examples for Technique Classification.
+
+    Each propaganda span becomes a separate classification example with format:
+    [CLS] Context [SEP] Propaganda_Snippet [SEP]
+
+    Args:
+        text: Full article text
+        labels: List of span annotations with technique labels
+        article_id: Article identifier
+        context_window: Characters of context to include before/after snippet
+
+    Returns:
+        List of dicts with: text, label, snippet, article_id
+    """
+    examples = []
+
+    for label_info in labels:
+        start, end = label_info["start"], label_info["end"]
+        technique = label_info["technique"]
+
+        # Extract propaganda snippet
         snippet = text[start:end]
-        
-        # Extract Context (100 chars before/after) for better accuracy
-        ctx_start = max(0, start - 100)
-        ctx_end = min(len(text), end + 100)
+
+        # Extract surrounding context
+        ctx_start = max(0, start - context_window)
+        ctx_end = min(len(text), end + context_window)
         context = text[ctx_start:ctx_end]
-        
-        # Input Format: "[CLS] snippet [SEP] context"
-        # This tells the model "Focus on this snippet, but here is the background info"
-        combined_text = f"{snippet} [SEP] {context}"
-        
-        new_examples.append({
+
+        # Format: "[CLS] Context [SEP] Propaganda_Snippet [SEP]"
+        # The model will learn to classify the snippet given its context
+        combined_text = f"{context} [SEP] {snippet}"
+
+        # Get label ID
+        label_id = LABEL2ID[technique]
+
+        examples.append({
             "text": combined_text,
-            "label": label_id, # The dataset already provides IDs matching our list usually
-            "snippet": snippet
+            "label": label_id,
+            "snippet": snippet,
+            "article_id": article_id,
+            "technique_name": technique,
         })
-        
-    return new_examples
 
-# ==============================================================================
-# 2. TRAINING FUNCTIONS
-# ==============================================================================
+    return examples
 
-def train_span_identification(dataset, tokenizer):
-    print("\n>>> 🛠️  Training Span Identification (SI) Model...")
-    
-    # 1. Map Data
-    tokenized_ds = dataset.map(
-        lambda x: prepare_si_dataset(x, tokenizer), 
-        batched=False,
-        remove_columns=dataset["train"].column_names
+
+def create_tc_dataset(
+    data: List[Dict],
+    tokenizer,
+    max_length: int = 256,
+    context_window: int = 100
+) -> Dataset:
+    """
+    Creates a HuggingFace Dataset for Technique Classification training.
+
+    "Explodes" the dataset so each propaganda span becomes a separate example.
+
+    Args:
+        data: List of article dicts from load_local_ptc_data
+        tokenizer: HuggingFace tokenizer
+        max_length: Maximum sequence length
+        context_window: Characters of context around snippet
+
+    Returns:
+        HuggingFace Dataset ready for training
+    """
+    all_examples = []
+
+    for article in data:
+        if not article["labels"]:
+            continue
+
+        examples = prepare_tc_examples(
+            article["text"],
+            article["labels"],
+            article["article_id"],
+            context_window
+        )
+        all_examples.extend(examples)
+
+    if not all_examples:
+        logger.warning("No TC examples created - check if labels are present")
+        return Dataset.from_list([])
+
+    # Tokenize all examples
+    texts = [ex["text"] for ex in all_examples]
+    labels = [ex["label"] for ex in all_examples]
+
+    tokenized = tokenizer(
+        texts,
+        truncation=True,
+        max_length=max_length,
+        padding="max_length",
+        return_tensors=None,
     )
-    
-    # 2. Setup Model (2 labels: O, PROP)
+
+    # Create dataset
+    dataset_dict = {
+        "input_ids": tokenized["input_ids"],
+        "attention_mask": tokenized["attention_mask"],
+        "labels": labels,
+        "article_id": [ex["article_id"] for ex in all_examples],
+        "snippet": [ex["snippet"] for ex in all_examples],
+        "technique_name": [ex["technique_name"] for ex in all_examples],
+    }
+
+    return Dataset.from_dict(dataset_dict)
+
+
+# =============================================================================
+# 4. METRICS
+# =============================================================================
+
+def compute_si_metrics(eval_pred):
+    """
+    Computes metrics for Span Identification (token classification).
+    """
+    predictions, labels = eval_pred
+    predictions = np.argmax(predictions, axis=2)
+
+    # Flatten and filter out ignored indices (-100)
+    true_labels = []
+    pred_labels = []
+
+    for pred_seq, label_seq in zip(predictions, labels):
+        for pred, label in zip(pred_seq, label_seq):
+            if label != -100:
+                true_labels.append(label)
+                pred_labels.append(pred)
+
+    # Binary: propaganda (1 or 2) vs non-propaganda (0)
+    true_binary = [1 if l > 0 else 0 for l in true_labels]
+    pred_binary = [1 if p > 0 else 0 for p in pred_labels]
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        true_binary, pred_binary, average="binary", zero_division=0
+    )
+    accuracy = accuracy_score(true_binary, pred_binary)
+
+    return {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+
+
+def compute_tc_metrics(eval_pred):
+    """
+    Computes metrics for Technique Classification.
+    """
+    predictions, labels = eval_pred
+    predictions = np.argmax(predictions, axis=1)
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        labels, predictions, average="micro", zero_division=0
+    )
+    accuracy = accuracy_score(labels, predictions)
+
+    # Also compute per-class metrics
+    precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(
+        labels, predictions, average="macro", zero_division=0
+    )
+
+    return {
+        "accuracy": accuracy,
+        "precision_micro": precision,
+        "recall_micro": recall,
+        "f1_micro": f1,
+        "precision_macro": precision_macro,
+        "recall_macro": recall_macro,
+        "f1_macro": f1_macro,
+    }
+
+
+# =============================================================================
+# 5. TRAINING FUNCTIONS
+# =============================================================================
+
+def train_span_identification(
+    train_data: List[Dict],
+    val_data: List[Dict],
+    tokenizer,
+) -> None:
+    """
+    Trains the Span Identification model using BIO tagging.
+
+    Args:
+        train_data: Training articles with labels
+        val_data: Validation articles with labels
+        tokenizer: HuggingFace tokenizer
+    """
+    logger.info(">>> Training Span Identification (SI) Model...")
+
+    # Create datasets
+    train_ds = create_si_dataset(train_data, tokenizer, model_config.max_length)
+    val_ds = create_si_dataset(val_data, tokenizer, model_config.max_length)
+
+    logger.info(f"    SI Train samples: {len(train_ds)}")
+    logger.info(f"    SI Val samples: {len(val_ds)}")
+
+    if len(train_ds) == 0:
+        logger.error("No training data for SI. Skipping.")
+        return
+
+    # Initialize model (3 labels: O, B-PROP, I-PROP)
     model = AutoModelForTokenClassification.from_pretrained(
-        MODEL_CHECKPOINT, num_labels=2
+        model_config.model_checkpoint,
+        num_labels=len(SI_LABELS),
+        id2label=SI_ID2LABEL,
+        label2id=SI_LABEL2ID,
     )
-    
-    # 3. Trainer
-    args = TrainingArguments(
-        output_dir=f"{SI_MODEL_DIR}/checkpoints",
-        evaluation_strategy="epoch",
+
+    # Training arguments
+    training_args = TrainingArguments(
+        output_dir=f"{training_config.si_model_dir}/checkpoints",
+        eval_strategy="epoch",
         save_strategy="epoch",
-        learning_rate=2e-5,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
-        num_train_epochs=4,
-        weight_decay=0.01,
+        learning_rate=training_config.learning_rate_si,
+        per_device_train_batch_size=training_config.batch_size_si,
+        per_device_eval_batch_size=training_config.batch_size_si,
+        num_train_epochs=training_config.num_epochs_si,
+        weight_decay=training_config.weight_decay,
+        warmup_ratio=training_config.warmup_ratio,
         load_best_model_at_end=True,
-        metric_for_best_model="loss"
+        metric_for_best_model="f1",
+        greater_is_better=True,
+        logging_dir=f"{training_config.si_model_dir}/logs",
+        logging_steps=100,
+        report_to="none",
     )
-    
+
+    # Data collator for token classification
+    data_collator = DataCollatorForTokenClassification(tokenizer)
+
+    # Remove non-tensor columns for training
+    train_ds = train_ds.remove_columns(["article_id"])
+    val_ds = val_ds.remove_columns(["article_id"])
+
+    # Initialize trainer
     trainer = Trainer(
         model=model,
-        args=args,
-        train_dataset=tokenized_ds["train"],
-        eval_dataset=tokenized_ds["validation"], # Use validation split
-        tokenizer=tokenizer,
-        data_collator=DataCollatorForTokenClassification(tokenizer)
-    )
-    
-    trainer.train()
-    trainer.save_model(SI_MODEL_DIR)
-    tokenizer.save_pretrained(SI_MODEL_DIR)
-    print(f"✅ SI Model saved to {SI_MODEL_DIR}")
-
-def train_technique_classification(dataset, tokenizer):
-    print("\n>>> 🛠️  Training Technique Classification (TC) Model...")
-    
-    # 1. Flatten Dataset (Article -> Multiple Examples)
-    train_list = []
-    for ex in dataset["train"]:
-        train_list.extend(prepare_tc_dataset(ex))
-        
-    val_list = []
-    for ex in dataset["validation"]:
-        val_list.extend(prepare_tc_dataset(ex))
-        
-    train_ds = Dataset.from_list(train_list)
-    val_ds = Dataset.from_list(val_list)
-    
-    print(f"    Converted to {len(train_ds)} classification examples.")
-
-    # 2. Tokenize
-    def tokenize_func(examples):
-        return tokenizer(examples["text"], padding="max_length", truncation=True, max_length=256)
-    
-    train_ds = train_ds.map(tokenize_func, batched=True)
-    val_ds = val_ds.map(tokenize_func, batched=True)
-    
-    # 3. Setup Model
-    model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_CHECKPOINT,
-        num_labels=len(TECHNIQUE_LABELS),
-        id2label=id2label,
-        label2id=label2id
-    )
-    
-    # 4. Trainer
-    args = TrainingArguments(
-        output_dir=f"{TC_MODEL_DIR}/checkpoints",
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        learning_rate=3e-5, # Slightly higher for classification
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=16,
-        num_train_epochs=5,
-        weight_decay=0.01,
-        load_best_model_at_end=True
-    )
-    
-    trainer = Trainer(
-        model=model,
-        args=args,
+        args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        tokenizer=tokenizer
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_metrics=compute_si_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
     )
-    
-    trainer.train()
-    trainer.save_model(TC_MODEL_DIR)
-    tokenizer.save_pretrained(TC_MODEL_DIR)
-    print(f"✅ TC Model saved to {TC_MODEL_DIR}")
 
-# ==============================================================================
-# MAIN
-# ==============================================================================
+    # Train
+    trainer.train()
+
+    # Save model
+    trainer.save_model(training_config.si_model_dir)
+    tokenizer.save_pretrained(training_config.si_model_dir)
+    logger.info(f"SI Model saved to {training_config.si_model_dir}")
+
+
+def train_technique_classification(
+    train_data: List[Dict],
+    val_data: List[Dict],
+    tokenizer,
+) -> None:
+    """
+    Trains the Technique Classification model.
+
+    Args:
+        train_data: Training articles with labels
+        val_data: Validation articles with labels
+        tokenizer: HuggingFace tokenizer
+    """
+    logger.info(">>> Training Technique Classification (TC) Model...")
+
+    # Create datasets (exploded - one example per span)
+    train_ds = create_tc_dataset(
+        train_data,
+        tokenizer,
+        model_config.tc_max_length,
+        model_config.context_window
+    )
+    val_ds = create_tc_dataset(
+        val_data,
+        tokenizer,
+        model_config.tc_max_length,
+        model_config.context_window
+    )
+
+    logger.info(f"    TC Train samples: {len(train_ds)} (exploded from articles)")
+    logger.info(f"    TC Val samples: {len(val_ds)}")
+
+    if len(train_ds) == 0:
+        logger.error("No training data for TC. Skipping.")
+        return
+
+    # Initialize model
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_config.model_checkpoint,
+        num_labels=len(PROPAGANDA_TECHNIQUES),
+        id2label=ID2LABEL,
+        label2id=LABEL2ID,
+    )
+
+    # Training arguments
+    training_args = TrainingArguments(
+        output_dir=f"{training_config.tc_model_dir}/checkpoints",
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        learning_rate=training_config.learning_rate_tc,
+        per_device_train_batch_size=training_config.batch_size_tc,
+        per_device_eval_batch_size=training_config.batch_size_tc,
+        num_train_epochs=training_config.num_epochs_tc,
+        weight_decay=training_config.weight_decay,
+        warmup_ratio=training_config.warmup_ratio,
+        load_best_model_at_end=True,
+        metric_for_best_model="f1_micro",
+        greater_is_better=True,
+        logging_dir=f"{training_config.tc_model_dir}/logs",
+        logging_steps=100,
+        report_to="none",
+    )
+
+    # Remove non-tensor columns for training
+    columns_to_remove = ["article_id", "snippet", "technique_name"]
+    train_ds = train_ds.remove_columns(columns_to_remove)
+    val_ds = val_ds.remove_columns(columns_to_remove)
+
+    # Initialize trainer
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_ds,
+        eval_dataset=val_ds,
+        tokenizer=tokenizer,
+        compute_metrics=compute_tc_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
+    )
+
+    # Train
+    trainer.train()
+
+    # Save model
+    trainer.save_model(training_config.tc_model_dir)
+    tokenizer.save_pretrained(training_config.tc_model_dir)
+    logger.info(f"TC Model saved to {training_config.tc_model_dir}")
+
+
+# =============================================================================
+# 6. MAIN PIPELINE
+# =============================================================================
+
+def main():
+    """
+    Main training pipeline entry point.
+    """
+    logger.info("=" * 60)
+    logger.info("SemEval 2020 Task 11 - Propaganda Detection Training Pipeline")
+    logger.info("=" * 60)
+
+    # Verify dataset directory exists
+    if not os.path.exists(DATASET_DIR):
+        logger.error(f"Dataset directory not found: {DATASET_DIR}")
+        logger.error("Please ensure your SemEval data is in the 'datasets/' folder.")
+        logger.error("Expected structure:")
+        logger.error("  datasets/")
+        logger.error("  ├── train/")
+        logger.error("  │   ├── articles/")
+        logger.error("  │   │   └── article*.txt")
+        logger.error("  │   └── labels/")
+        logger.error("  │       └── article*.task-flc-tc.labels")
+        logger.error("  ├── dev/")
+        logger.error("  └── test/")
+        return
+
+    # Load all data splits
+    logger.info(">>> Loading local PTC dataset...")
+    splits = load_all_splits()
+
+    train_data = splits.get("train", [])
+    val_data = splits.get("validation", [])
+    test_data = splits.get("test", [])
+
+    logger.info(f"    Train articles: {len(train_data)}")
+    logger.info(f"    Validation articles: {len(val_data)}")
+    logger.info(f"    Test articles: {len(test_data)}")
+
+    if not train_data:
+        logger.error("No training data found. Cannot proceed.")
+        return
+
+    if not val_data:
+        logger.warning("No validation data found. Using 10% of training data for validation.")
+        split_idx = int(len(train_data) * 0.9)
+        val_data = train_data[split_idx:]
+        train_data = train_data[:split_idx]
+
+    # Initialize tokenizer
+    logger.info(f">>> Loading tokenizer: {model_config.model_checkpoint}")
+    tokenizer = AutoTokenizer.from_pretrained(model_config.model_checkpoint)
+
+    # Create output directories
+    os.makedirs(training_config.si_model_dir, exist_ok=True)
+    os.makedirs(training_config.tc_model_dir, exist_ok=True)
+
+    # Train models
+    logger.info("")
+    train_span_identification(train_data, val_data, tokenizer)
+
+    logger.info("")
+    train_technique_classification(train_data, val_data, tokenizer)
+
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("ALL TRAINING COMPLETE!")
+    logger.info("=" * 60)
+    logger.info(f"SI Model: {training_config.si_model_dir}")
+    logger.info(f"TC Model: {training_config.tc_model_dir}")
+    logger.info("")
+    logger.info("Next steps:")
+    logger.info("  1. Evaluate models on test set")
+    logger.info("  2. Run inference: python profiler.py [url] [country] --model local")
+
 
 if __name__ == "__main__":
-    print(">>> 📥 Loading SemEval-2020 Task 11 Dataset from Hugging Face...")
-    # This automatically downloads the dataset structure you described
-    raw_dataset = load_dataset("SemEvalWorkshop/sem_eval_2020_task_11")
-    
-    # Initialize Tokenizer (Shared for both)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_CHECKPOINT)
-    
-    # Step 1: Train Span Identifier
-    train_span_identification(raw_dataset, tokenizer)
-    
-    # Step 2: Train Technique Classifier
-    train_technique_classification(raw_dataset, tokenizer)
-    
-    print("\n🎉 ALL TRAINING COMPLETE!")
-    print(f"Models are ready in {OUTPUT_DIR}/")
-    print("Next: Run 'python profiler.py [url] [country] --model local'")
+    main()
