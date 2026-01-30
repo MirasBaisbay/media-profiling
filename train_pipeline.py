@@ -849,6 +849,11 @@ def train_span_identification(
         label2id=SI_LABEL2ID,
     )
 
+    # Enable gradient checkpointing to save VRAM
+    if training_config.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        logger.info("    Gradient checkpointing enabled")
+
     # Training arguments
     training_args = TrainingArguments(
         output_dir=f"{training_config.si_model_dir}/checkpoints",
@@ -857,7 +862,7 @@ def train_span_identification(
         learning_rate=training_config.learning_rate_si,
         per_device_train_batch_size=training_config.batch_size_si,
         per_device_eval_batch_size=training_config.batch_size_si,
-        gradient_accumulation_steps=2,  # Effective batch size = batch_size * 2
+        gradient_accumulation_steps=8,  # Effective batch size = 4 * 8 = 32
         num_train_epochs=training_config.num_epochs_si,
         weight_decay=training_config.weight_decay,
         warmup_ratio=training_config.warmup_ratio,
@@ -973,6 +978,11 @@ def train_technique_classification(
         label2id=LABEL2ID,
     )
 
+    # Enable gradient checkpointing to save VRAM
+    if training_config.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        logger.info("    Gradient checkpointing enabled")
+
     # Training arguments
     training_args = TrainingArguments(
         output_dir=f"{training_config.tc_model_dir}/checkpoints",
@@ -981,7 +991,7 @@ def train_technique_classification(
         learning_rate=training_config.learning_rate_tc,
         per_device_train_batch_size=training_config.batch_size_tc,
         per_device_eval_batch_size=training_config.batch_size_tc,
-        gradient_accumulation_steps=2,  # Effective batch size = batch_size * 2
+        gradient_accumulation_steps=8,  # Effective batch size = 8 * 8 = 64
         num_train_epochs=training_config.num_epochs_tc,
         weight_decay=training_config.weight_decay,
         warmup_ratio=training_config.warmup_ratio,
