@@ -79,17 +79,6 @@ training_config = TrainingConfig()
 def find_article_files(data_dir: str) -> Dict[str, Dict[str, str]]:
     """
     Finds all article text files and their corresponding label files.
-
-    Handles multiple possible directory structures:
-    - Flat: all files in same directory
-    - Nested: articles/ and labels/ subdirectories
-    - Mixed: labels in parallel folder
-
-    Args:
-        data_dir: Path to the data split directory (train/dev/test)
-
-    Returns:
-        Dict mapping article_id to {"text_path": ..., "label_path": ...}
     """
     article_files = {}
 
@@ -106,36 +95,41 @@ def find_article_files(data_dir: str) -> Dict[str, Dict[str, str]]:
     txt_files = list(set(txt_files))  # Remove duplicates
 
     for txt_path in txt_files:
-        # Extract article ID from filename (e.g., "article111111111.txt" -> "111111111")
+        # Extract article ID from filename
         basename = os.path.basename(txt_path)
         match = re.match(r"article(\d+)\.txt", basename)
         if not match:
             continue
         article_id = match.group(1)
 
-        # Look for corresponding label file in multiple locations
-        label_filename = f"article{article_id}.task-flc-tc.labels"
-        possible_label_paths = [
-            # Same directory as article
-            os.path.join(os.path.dirname(txt_path), label_filename),
-            # Parallel labels/ directory
-            os.path.join(data_dir, "labels", label_filename),
-            # Labels in parent's labels/ directory
-            os.path.join(os.path.dirname(os.path.dirname(txt_path)), "labels", label_filename),
-            # Ground truth directory (common in SemEval)
-            os.path.join(data_dir, "ground-truth", label_filename),
-            os.path.join(data_dir, "propaganda-techniques-annotations", label_filename),
+        # UPDATED: Added your specific filename pattern
+        possible_filenames = [
+            f"article{article_id}.task2-TC.labels",     # <--- YOUR SPECIFIC FILE PATTERN
+            f"article{article_id}.task-flc-tc.labels", # Standard SemEval
+            f"article{article_id}.labels",              # Simplified
+            f"article{article_id}.task-si.labels"       # Task 1 specific
+        ]
+
+        # Look in multiple directories
+        search_dirs = [
+            os.path.dirname(txt_path), # Same dir
+            os.path.join(os.path.dirname(txt_path), "labels"), # Subdir relative to txt
+            os.path.join(os.path.dirname(os.path.dirname(txt_path)), "labels"), # Parallel dir
+            os.path.join(data_dir, "labels"), # Root labels dir
         ]
 
         label_path = None
-        for lp in possible_label_paths:
-            if os.path.exists(lp):
-                label_path = lp
-                break
+        for s_dir in search_dirs:
+            for fname in possible_filenames:
+                p = os.path.join(s_dir, fname)
+                if os.path.exists(p):
+                    label_path = p
+                    break
+            if label_path: break
 
         article_files[article_id] = {
             "text_path": txt_path,
-            "label_path": label_path,  # May be None if no labels (e.g., test set)
+            "label_path": label_path,
         }
 
     return article_files
@@ -797,9 +791,15 @@ def main():
         logger.error("No training data found. Cannot proceed.")
         return
 
-    if not val_data:
-        logger.warning("No validation data found. Using 10% of training data for validation.")
+    val_has_labels = False
+    if val_data:
+        val_has_labels = any(len(article['labels']) > 0 for article in val_data)
+
+    # If no validation data OR validation data is empty of labels, split the training set
+    if not val_data or not val_has_labels:
+        logger.warning("Validation data missing or has no labels. Using 10% of training data for validation.")
         split_idx = int(len(train_data) * 0.9)
+        # Slicing the list
         val_data = train_data[split_idx:]
         train_data = train_data[:split_idx]
 

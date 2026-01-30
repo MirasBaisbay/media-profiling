@@ -133,11 +133,10 @@ LEGACY_LABEL_MAPPING = {
     # Merged: Bandwagon + Reductio_ad_Hitlerum
     "Bandwagon": "Bandwagon,Reductio_ad_Hitlerum",
     "Reductio_ad_hitlerum": "Bandwagon,Reductio_ad_Hitlerum",
+    "Bandwagon,Reductio_ad_hitlerum": "Bandwagon,Reductio_ad_Hitlerum",
 
     # Merged: Whataboutism + Straw_Men + Red_Herring
-    "Whataboutism": "Whataboutism,Straw_Men,Red_Herring",
-    "Straw_Men": "Whataboutism,Straw_Men,Red_Herring",
-    "Red_Herring": "Whataboutism,Straw_Men,Red_Herring",
+    "Whataboutism": "Whataboutism,Straw_Men,Red_Herring"
 }
 
 # Labels to exclude (eliminated in V2)
@@ -195,7 +194,7 @@ class TrainingConfig:
     learning_rate_tc: float = 3e-5
     batch_size_si: int = 8
     batch_size_tc: int = 16
-    num_epochs_si: int = 4
-    num_epochs_tc: int = 5
+    num_epochs_si: int = 1
+    num_epochs_tc: int = 1
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
