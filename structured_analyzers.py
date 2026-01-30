@@ -552,6 +552,14 @@ class StructuredSocialAnalyzer:
 # COMBINED STRUCTURED BIAS ANALYZER
 # =============================================================================
 
+# Import editorial bias detection
+from editorial_bias_detection import (
+    StructuredEditorialBiasAnalyzer,
+    StructuredNewsReportingAnalyzer,
+    CompleteBiasAnalyzer as EditorialCompleteBiasAnalyzer,
+)
+
+
 class StructuredBiasAnalyzer:
     """
     Combined analyzer for full bias scoring using MBFC methodology.
@@ -559,84 +567,188 @@ class StructuredBiasAnalyzer:
     Combines:
     - Structured Economic Analysis (35%)
     - Structured Social Analysis (35%)
-    - News Reporting Balance (15%) - uses existing analyzer
-    - Editorial Bias (15%) - uses existing analyzer
+    - News Reporting Balance (15%)
+    - Editorial Bias (15%)
+
+    All components use structured, evidence-based analysis with academic backing.
     """
 
     def __init__(self):
         self.economic_analyzer = StructuredEconomicAnalyzer()
         self.social_analyzer = StructuredSocialAnalyzer()
+        self.editorial_analyzer = StructuredEditorialBiasAnalyzer()
+        self.news_reporting_analyzer = StructuredNewsReportingAnalyzer()
 
     def analyze(self, articles: List[Article]) -> Dict[str, Any]:
         """
-        Perform complete bias analysis.
+        Perform complete bias analysis using all 4 MBFC components.
 
         Returns dict with:
-        - economic_analysis: DimensionAnalysis
-        - social_analysis: DimensionAnalysis
-        - combined_score: float (-10 to +10)
+        - economic_analysis: DimensionAnalysis (35%)
+        - social_analysis: DimensionAnalysis (35%)
+        - news_reporting_analysis: dict (15%)
+        - editorial_analysis: EditorialBiasAnalysis (15%)
+        - final_score: float (-10 to +10)
+        - final_label: str
         - methodology_report: str
         """
-        # Run structured analyses
+        logger.info("Starting complete structured bias analysis")
+
+        # Run all four analyses
         economic = self.economic_analyzer.analyze(articles)
         social = self.social_analyzer.analyze(articles)
+        news_reporting = self.news_reporting_analyzer.analyze(articles)
+        editorial = self.editorial_analyzer.analyze(articles)
 
-        # Calculate combined score (just economic + social for now)
-        # Full implementation would include news reporting and editorial
+        # Calculate weighted final score using MBFC weights
         weights = BiasWeights()
-        partial_score = (
-            economic.final_score * weights.economic +
-            social.final_score * weights.social
-        ) / (weights.economic + weights.social)  # Normalize to just these two
+        final_score = (
+            economic.final_score * weights.economic +           # 35%
+            social.final_score * weights.social +               # 35%
+            news_reporting["balance_score"] * weights.reporting + # 15%
+            editorial.overall_score * weights.editorial          # 15%
+        )
+
+        # Determine final label
+        final_label = self._get_bias_label(final_score)
 
         # Build methodology report
-        methodology_report = self._build_methodology_report(economic, social)
+        methodology_report = self._build_methodology_report(
+            economic, social, news_reporting, editorial, final_score, final_label
+        )
 
         return {
             "economic_analysis": economic,
             "social_analysis": social,
-            "partial_score": round(partial_score, 2),  # Just economic + social
-            "methodology_report": methodology_report
+            "news_reporting_analysis": news_reporting,
+            "editorial_analysis": editorial,
+            "final_score": round(final_score, 2),
+            "final_label": final_label,
+            "methodology_report": methodology_report,
+            # Component scores for easy access
+            "component_scores": {
+                "economic": economic.final_score,
+                "social": social.final_score,
+                "news_reporting": news_reporting["balance_score"],
+                "editorial": editorial.overall_score
+            }
         }
+
+    def _get_bias_label(self, score: float) -> str:
+        """Map score to MBFC bias label."""
+        if score <= -8.0:
+            return "Extreme Left"
+        elif score <= -5.0:
+            return "Left"
+        elif score <= -2.0:
+            return "Left-Center"
+        elif score <= 1.9:
+            return "Least Biased"
+        elif score <= 4.9:
+            return "Right-Center"
+        elif score <= 7.9:
+            return "Right"
+        else:
+            return "Extreme Right"
 
     def _build_methodology_report(
         self,
         economic: DimensionAnalysis,
-        social: DimensionAnalysis
+        social: DimensionAnalysis,
+        news_reporting: Dict[str, Any],
+        editorial,
+        final_score: float,
+        final_label: str
     ) -> str:
         """Build a detailed methodology report."""
         report = []
         report.append("=" * 70)
-        report.append("STRUCTURED IDEOLOGY ANALYSIS REPORT")
+        report.append("COMPLETE STRUCTURED BIAS ANALYSIS REPORT")
+        report.append("(MBFC Methodology Compliant)")
         report.append("=" * 70)
 
-        report.append("\n## ECONOMIC ANALYSIS")
-        report.append(f"Final Score: {economic.final_score:+.2f}")
+        # Final Result
+        report.append(f"\n### FINAL BIAS SCORE: {final_score:+.2f}")
+        report.append(f"### FINAL LABEL: {final_label}")
+
+        # Economic Analysis (35%)
+        report.append("\n" + "-" * 70)
+        report.append("## 1. ECONOMIC SYSTEM (35% weight)")
+        report.append("-" * 70)
+        report.append(f"Score: {economic.final_score:+.2f}")
         report.append(f"Label: {economic.final_label}")
         report.append(f"Confidence: {economic.confidence:.0%}")
-        report.append(f"Methodology: {economic.methodology_notes}")
+        report.append(f"Method: {economic.methodology_notes}")
 
         if economic.ideology_evidence:
-            report.append("\nEvidence by ideology:")
-            for ideology, evidence_list in economic.ideology_evidence.items():
+            report.append("\nEvidence found:")
+            for ideology, evidence_list in list(economic.ideology_evidence.items())[:3]:
                 report.append(f"  {ideology}:")
-                for ev in evidence_list[:2]:  # Limit to 2 per ideology
-                    report.append(f"    - {ev[:100]}...")
+                for ev in evidence_list[:1]:
+                    report.append(f"    \"{ev[:80]}...\"")
 
-        report.append("\n## SOCIAL ANALYSIS")
-        report.append(f"Final Score: {social.final_score:+.2f}")
+        # Social Analysis (35%)
+        report.append("\n" + "-" * 70)
+        report.append("## 2. SOCIAL VALUES (35% weight)")
+        report.append("-" * 70)
+        report.append(f"Score: {social.final_score:+.2f}")
         report.append(f"Label: {social.final_label}")
         report.append(f"Confidence: {social.confidence:.0%}")
-        report.append(f"Methodology: {social.methodology_notes}")
+        report.append(f"Method: {social.methodology_notes}")
 
         if social.ideology_evidence:
-            report.append("\nEvidence by ideology:")
-            for ideology, evidence_list in social.ideology_evidence.items():
+            report.append("\nEvidence found:")
+            for ideology, evidence_list in list(social.ideology_evidence.items())[:3]:
                 report.append(f"  {ideology}:")
-                for ev in evidence_list[:2]:
-                    report.append(f"    - {ev[:100]}...")
+                for ev in evidence_list[:1]:
+                    report.append(f"    \"{ev[:80]}...\"")
+
+        # News Reporting Balance (15%)
+        report.append("\n" + "-" * 70)
+        report.append("## 3. NEWS REPORTING BALANCE (15% weight)")
+        report.append("-" * 70)
+        report.append(f"Score: {news_reporting['balance_score']:+.2f}")
+        report.append(f"Label: {news_reporting['balance_label']}")
+        report.append(f"Perspective Diversity: {news_reporting['perspective_diversity']:.0%}")
+        report.append(f"Method: {news_reporting['methodology_notes']}")
+
+        if "evidence" in news_reporting and news_reporting["evidence"]:
+            report.append("\nObservations:")
+            for ev in news_reporting["evidence"][:2]:
+                report.append(f"  - {ev}")
+
+        # Editorial Bias (15%)
+        report.append("\n" + "-" * 70)
+        report.append("## 4. EDITORIAL BIAS (15% weight)")
+        report.append("-" * 70)
+        report.append(f"Score: {editorial.overall_score:+.2f}")
+        report.append(f"Direction: {editorial.direction}")
+        report.append(f"Clickbait Level: {editorial.clickbait_score:.1f}/10")
+        report.append(f"Loaded Language: {editorial.loaded_language_score:.1f}/10")
+        report.append(f"Emotional Manipulation: {editorial.emotional_manipulation_score:.1f}/10")
+        report.append(f"Method: {editorial.methodology_notes}")
+
+        # Clickbait headlines found
+        clickbait_headlines = [h for h in editorial.headline_analyses if h.is_clickbait]
+        if clickbait_headlines:
+            report.append(f"\nClickbait headlines detected ({len(clickbait_headlines)}):")
+            for h in clickbait_headlines[:3]:
+                report.append(f"  - \"{h.headline[:60]}...\"")
+                report.append(f"    Patterns: {h.explanation}")
+
+        # Calculation Summary
+        report.append("\n" + "-" * 70)
+        report.append("## CALCULATION SUMMARY")
+        report.append("-" * 70)
+        report.append(f"Economic ({economic.final_score:+.2f}) × 0.35 = {economic.final_score * 0.35:+.2f}")
+        report.append(f"Social ({social.final_score:+.2f}) × 0.35 = {social.final_score * 0.35:+.2f}")
+        report.append(f"News Reporting ({news_reporting['balance_score']:+.2f}) × 0.15 = {news_reporting['balance_score'] * 0.15:+.2f}")
+        report.append(f"Editorial ({editorial.overall_score:+.2f}) × 0.15 = {editorial.overall_score * 0.15:+.2f}")
+        report.append(f"TOTAL: {final_score:+.2f} → {final_label}")
 
         report.append("\n" + "=" * 70)
+        report.append("END OF REPORT")
+        report.append("=" * 70)
 
         return "\n".join(report)
 
