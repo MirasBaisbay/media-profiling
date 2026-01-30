@@ -141,7 +141,7 @@ class MediaScraper:
         # Extract Text (Heuristic: Find the container with the most paragraphs)
         best_div = None
         max_p = 0
-        
+
         # Search common content containers
         candidates = soup.find_all(['div', 'article', 'section', 'main'])
         for div in candidates:
@@ -149,7 +149,7 @@ class MediaScraper:
             if p_count > max_p:
                 max_p = p_count
                 best_div = div
-        
+
         if best_div and max_p > 3:
             paragraphs = best_div.find_all('p')
         else:
@@ -165,15 +165,119 @@ class MediaScraper:
             if 'http' in a['href'] and self.domain not in a['href']:
                 sources.append(a['href'])
 
+        # Detect if article is opinion/editorial vs straight news
+        is_opinion = self._detect_opinion_article(url, title, soup)
+
+        # Try to extract author
+        author = self._extract_author(soup)
+
+        # Try to extract category
+        category = self._extract_category(url, soup)
+
         return Article(
             url=url,
             title=title,
             text=text,
-            author="Unknown",
+            author=author,
             date="Unknown",
+            category=category,
             has_sources=len(sources) > 0,
-            source_links=sources
+            source_links=sources,
+            is_opinion=is_opinion
         )
+
+    def _detect_opinion_article(self, url: str, title: str, soup: BeautifulSoup) -> bool:
+        """
+        Detects if an article is opinion/editorial vs straight news.
+        Important for MBFC methodology which separates news reporting from editorial bias.
+        """
+        # URL indicators
+        opinion_url_patterns = [
+            '/opinion/', '/opinions/', '/editorial/', '/editorials/',
+            '/op-ed/', '/oped/', '/commentary/', '/perspective/',
+            '/analysis/', '/column/', '/columns/', '/blog/',
+            '/views/', '/viewpoint/', '/contributor/'
+        ]
+        url_lower = url.lower()
+        if any(pattern in url_lower for pattern in opinion_url_patterns):
+            return True
+
+        # Title indicators
+        title_lower = title.lower()
+        opinion_title_patterns = [
+            'opinion:', 'editorial:', 'commentary:', 'analysis:',
+            'column:', 'op-ed:', 'perspective:', 'letter to',
+            'my view', 'i think', 'why we should', 'why i'
+        ]
+        if any(pattern in title_lower for pattern in opinion_title_patterns):
+            return True
+
+        # Meta tag indicators
+        meta_section = soup.find('meta', {'property': 'article:section'})
+        if meta_section:
+            section = meta_section.get('content', '').lower()
+            if any(x in section for x in ['opinion', 'editorial', 'commentary', 'analysis']):
+                return True
+
+        # Schema.org indicators
+        schema_type = soup.find('script', {'type': 'application/ld+json'})
+        if schema_type:
+            try:
+                import json
+                data = json.loads(schema_type.string)
+                if isinstance(data, dict):
+                    article_type = data.get('@type', '').lower()
+                    if 'opinion' in article_type or 'analysis' in article_type:
+                        return True
+            except:
+                pass
+
+        # CSS class indicators
+        article_elem = soup.find('article')
+        if article_elem:
+            classes = ' '.join(article_elem.get('class', []))
+            if any(x in classes.lower() for x in ['opinion', 'editorial', 'commentary']):
+                return True
+
+        return False
+
+    def _extract_author(self, soup: BeautifulSoup) -> str:
+        """Extracts author name from article."""
+        # Common author selectors
+        author_selectors = [
+            ('meta', {'name': 'author'}),
+            ('meta', {'property': 'article:author'}),
+            ('a', {'rel': 'author'}),
+            ('span', {'class': re.compile(r'author', re.I)}),
+            ('p', {'class': re.compile(r'author', re.I)}),
+            ('div', {'class': re.compile(r'byline', re.I)}),
+        ]
+
+        for tag, attrs in author_selectors:
+            elem = soup.find(tag, attrs)
+            if elem:
+                if tag == 'meta':
+                    return elem.get('content', 'Unknown')
+                else:
+                    return elem.get_text(strip=True)[:100]  # Cap length
+
+        return "Unknown"
+
+    def _extract_category(self, url: str, soup: BeautifulSoup) -> Optional[str]:
+        """Extracts article category/section."""
+        # Try meta tag
+        meta_section = soup.find('meta', {'property': 'article:section'})
+        if meta_section:
+            return meta_section.get('content')
+
+        # Try URL path
+        path_parts = url.split('/')
+        if len(path_parts) > 3:
+            potential_category = path_parts[3]
+            if len(potential_category) > 2 and potential_category.isalpha():
+                return potential_category.title()
+
+        return None
 
     def get_metadata(self) -> SiteMetadata:
         """

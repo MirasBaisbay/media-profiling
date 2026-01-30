@@ -161,6 +161,83 @@ SOCIAL_SCALE = {
     "Traditional Conservative": 7.5, "Strong Traditional Conservative": 10.0
 }
 
+# =============================================================================
+# NEWS REPORTING BALANCE SCALE (15% of Bias Score)
+# =============================================================================
+# Measures how well a source reports all sides in its straight news stories
+NEWS_REPORTING_SCALE = {
+    "Extreme Left Reporting": -10.0,
+    "Strong Left Reporting": -7.5,
+    "Moderate Left Reporting": -5.0,
+    "Mild Left Reporting": -2.5,
+    "Neutral/Balanced": 0.0,
+    "Mild Right Reporting": 2.5,
+    "Moderate Right Reporting": 5.0,
+    "Strong Right Reporting": 7.5,
+    "Extreme Right Reporting": 10.0
+}
+
+# =============================================================================
+# EDITORIAL BIAS SCALE (15% of Bias Score)
+# =============================================================================
+# Evaluates bias in opinion pieces, editorials, and use of loaded language
+EDITORIAL_BIAS_SCALE = {
+    "Extreme Left Editorial": -10.0,
+    "Strong Left Editorial": -7.5,
+    "Moderate Left Editorial": -5.0,
+    "Mild Left Editorial": -2.5,
+    "Neutral/Balanced Editorial": 0.0,
+    "Mild Right Editorial": 2.5,
+    "Moderate Right Editorial": 5.0,
+    "Strong Right Editorial": 7.5,
+    "Extreme Right Editorial": 10.0
+}
+
+# =============================================================================
+# SOURCING QUALITY SCALE (25% of Factuality Score)
+# =============================================================================
+# Scale 0-10 where 0 is perfect sourcing, 10 is no sourcing
+SOURCING_DESCRIPTIONS = {
+    0: "Perfect sourcing; highly credible references with clear citations",
+    1: "Almost perfect sourcing with minor inconsistencies",
+    2: "Mostly credible sourcing but occasional lapses",
+    3: "Generally credible but sourcing issues occur more frequently",
+    4: "Mostly credible but noticeable reliance on less trustworthy sources",
+    5: "Mixed sourcing including credible and questionable references",
+    6: "Moderate sourcing issues with frequent reliance on less credible sources",
+    7: "Limited sourcing mostly relying on questionable references",
+    8: "Very limited sourcing heavily reliant on discredited sources",
+    9: "Minimal sourcing using widely discredited sources",
+    10: "No sourcing or complete reliance on discredited sources"
+}
+
+# =============================================================================
+# IFCN APPROVED FACT CHECKERS
+# =============================================================================
+# International Fact-Checking Network approved organizations
+IFCN_FACT_CHECKERS = [
+    "politifact.com",
+    "factcheck.org",
+    "snopes.com",
+    "apnews.com/ap-fact-check",
+    "reuters.com/fact-check",
+    "washingtonpost.com/news/fact-checker",
+    "fullfact.org",
+    "checkyourfact.com",
+    "leadstories.com",
+    "africacheck.org",
+    "truthorfiction.com"
+]
+
+# Search queries for fact checking
+FACT_CHECK_SEARCH_TERMS = [
+    "fact check",
+    "false claim",
+    "misinformation",
+    "debunked",
+    "misleading"
+]
+
 @dataclass
 class BiasWeights:
     economic: float = 0.35
