@@ -221,24 +221,24 @@ def report_node(state: ProfilerState) -> Dict:
     Generates final MBFC-compliant report with weighted scores.
     """
     # === Calculate Weighted Bias Score ===
-    bias_score = ScoringCalculator.calculate_bias(
+    bias_analysis = ScoringCalculator.calculate_bias(
         economic_score=state["economic_bias"],
         social_score=state["social_bias"],
-        reporting_score=state["news_reporting_bias"],
+        news_reporting_score=state["news_reporting_bias"],
         editorial_score=state["editorial_bias"]
     )
+    bias_score = bias_analysis.weighted_total
+    bias_label = bias_analysis.final_label
 
     # === Calculate Weighted Factuality Score ===
-    fact_score = ScoringCalculator.calculate_factuality(
+    fact_analysis = ScoringCalculator.calculate_factuality(
         fact_check_score=state["fact_check_score"],
         sourcing_score=state["sourcing_score"],
         transparency_score=state["transparency_score"],
         propaganda_score=state["propaganda_score"]
     )
-
-    # === Get MBFC Labels ===
-    bias_label = ScoringCalculator.get_bias_label(bias_score)
-    fact_label = ScoringCalculator.get_factuality_label(fact_score)
+    fact_score = fact_analysis.weighted_total
+    fact_label = fact_analysis.final_label
 
     # === Calculate Overall Credibility (0-10 scale) ===
     cred_score, cred_level, f_pts, b_pts = ScoringCalculator.calculate_credibility(
