@@ -194,9 +194,9 @@ class TrainingConfig:
     # Lower learning rates for larger model
     learning_rate_si: float = 1e-5
     learning_rate_tc: float = 1.5e-5
-    # Larger batch sizes for RTX 5090 (32GB VRAM)
-    batch_size_si: int = 16
-    batch_size_tc: int = 32
+    # Reduced batch sizes to fit deberta-v3-large in VRAM
+    batch_size_si: int = 4  # Reduced from 16 (large model + 512 seq len)
+    batch_size_tc: int = 8  # Reduced from 32 (large model + 384 seq len)
     # More epochs for better convergence
     num_epochs_si: int = 15
     num_epochs_tc: int = 10
@@ -208,3 +208,4 @@ class TrainingConfig:
     max_class_weight_ratio: float = 8.0  # Slightly reduced for stability with larger model
     si_early_stopping_patience: int = 4  # More patience for larger model
     tc_early_stopping_patience: int = 4  # More patience for larger model
+    gradient_checkpointing: bool = True  # Save VRAM by trading compute for memory
