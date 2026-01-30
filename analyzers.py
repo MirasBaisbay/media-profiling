@@ -545,6 +545,17 @@ class FactCheckSearcher:
             details=details
         )
 
+    def analyze(self, url: str) -> float:
+        """
+        Analyze a URL for fact check failures.
+        Returns the score (0-10) for use by profiler.
+        """
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        domain = parsed.netloc.replace('www.', '')
+        result = self.search(domain)
+        return result.score
+
     def _llm_fact_check_estimate(self, domain: str, outlet_name: str) -> int:
         """Use LLM knowledge to estimate fact check record."""
         prompt = f"""

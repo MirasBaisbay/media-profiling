@@ -131,13 +131,13 @@ def analyze_node(state: ProfilerState) -> Dict:
 
     return {
         # Bias components (raw scores on -10 to +10 scale)
-        "economic_bias": economic_result,
-        "social_bias": social_result,
-        "news_reporting_bias": news_reporting_result,
-        "editorial_bias": editorial_result,
+        "economic_bias": economic_result["score"],
+        "social_bias": social_result["score"],
+        "news_reporting_bias": news_reporting_result["score"],
+        "editorial_bias": editorial_result["score"],
         # Factuality components (raw scores on 0-10 scale, lower is better)
         "fact_check_score": fact_check_result,
-        "sourcing_score": sourcing_result,
+        "sourcing_score": sourcing_result.score,
         "transparency_score": transparency_result,
         "propaganda_score": propaganda_result.score,
         # Full propaganda analysis for human review
