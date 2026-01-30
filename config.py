@@ -285,4 +285,4 @@ class TrainingConfig:
     max_class_weight_ratio: float = 8.0  # Slightly reduced for stability with larger model
     si_early_stopping_patience: int = 4  # More patience for larger model
     tc_early_stopping_patience: int = 4  # More patience for larger model
-    gradient_checkpointing: bool = True  # Save VRAM by trading compute for memory
+    gradient_checkpointing: bool = False  # Save VRAM by trading compute for memory

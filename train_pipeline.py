@@ -849,6 +849,8 @@ def train_span_identification(
         label2id=SI_LABEL2ID,
     )
 
+    model.config.use_cache = False
+
     # Enable gradient checkpointing to save VRAM
     if training_config.gradient_checkpointing:
         model.gradient_checkpointing_enable()
@@ -977,6 +979,8 @@ def train_technique_classification(
         id2label=ID2LABEL,
         label2id=LABEL2ID,
     )
+
+    model.config.use_cache = False
 
     # Enable gradient checkpointing to save VRAM
     if training_config.gradient_checkpointing:
