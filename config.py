@@ -198,8 +198,9 @@ class TrainingConfig:
     num_epochs_tc: int = 5  # Increased from 1 - TC needs more epochs for 14 classes
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
-    use_class_weights: bool = True  # Enable class weighting for imbalanced data
+    use_class_weights: bool = True  # Enable sqrt-dampened class weighting for imbalanced data
     use_focal_loss: bool = True  # Use focal loss for better handling of hard examples
-    focal_loss_gamma: float = 2.0  # Focal loss focusing parameter
+    focal_loss_gamma: float = 1.0  # Focal loss focusing parameter (reduced from 2.0 for stability)
+    max_class_weight_ratio: float = 10.0  # Maximum ratio between highest and lowest class weight
     si_early_stopping_patience: int = 3  # Patience for early stopping
     tc_early_stopping_patience: int = 3  # Patience for early stopping

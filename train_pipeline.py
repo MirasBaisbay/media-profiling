@@ -582,15 +582,16 @@ def compute_tc_metrics(eval_pred):
 # 5. CLASS WEIGHTS AND CUSTOM TRAINERS
 # =============================================================================
 
-def compute_si_class_weights(train_dataset: Dataset) -> torch.Tensor:
+def compute_si_class_weights(train_dataset: Dataset, max_weight_ratio: float = 10.0) -> torch.Tensor:
     """
     Computes class weights for Span Identification based on label distribution.
 
-    Uses inverse frequency weighting to handle severe class imbalance
-    where "O" tokens vastly outnumber "B-PROP" and "I-PROP" tokens.
+    Uses sqrt-dampened inverse frequency weighting with a maximum cap to handle
+    severe class imbalance without causing the model to predict all propaganda.
 
     Args:
         train_dataset: Training dataset with 'labels' field
+        max_weight_ratio: Maximum ratio between highest and lowest weight (default: 10.0)
 
     Returns:
         torch.Tensor of shape (3,) with weights for [O, B-PROP, I-PROP]
@@ -606,18 +607,26 @@ def compute_si_class_weights(train_dataset: Dataset) -> torch.Tensor:
     total = sum(label_counts.values())
     num_classes = 3  # O, B-PROP, I-PROP
 
-    # Compute inverse frequency weights
+    # Compute sqrt-dampened inverse frequency weights
+    # sqrt dampening prevents extreme weights while still addressing imbalance
     weights = []
     for i in range(num_classes):
         count = label_counts.get(i, 1)  # Avoid division by zero
-        # Use smoothed inverse frequency: total / (num_classes * count)
-        weight = total / (num_classes * count)
+        # Use sqrt of inverse frequency for gentler weighting
+        weight = np.sqrt(total / (num_classes * count))
         weights.append(weight)
 
-    weights = torch.tensor(weights, dtype=torch.float32)
+    weights = np.array(weights)
 
-    # Normalize weights so they sum to num_classes
-    weights = weights / weights.sum() * num_classes
+    # Cap the maximum weight ratio to prevent extreme imbalance
+    min_weight = weights.min()
+    max_allowed = min_weight * max_weight_ratio
+    weights = np.clip(weights, None, max_allowed)
+
+    # Normalize so minimum weight is 1.0
+    weights = weights / weights.min()
+
+    weights = torch.tensor(weights, dtype=torch.float32)
 
     logger.info(f"SI Class distribution: O={label_counts.get(0, 0)}, "
                 f"B-PROP={label_counts.get(1, 0)}, I-PROP={label_counts.get(2, 0)}")
@@ -626,12 +635,15 @@ def compute_si_class_weights(train_dataset: Dataset) -> torch.Tensor:
     return weights
 
 
-def compute_tc_class_weights(train_dataset: Dataset) -> torch.Tensor:
+def compute_tc_class_weights(train_dataset: Dataset, max_weight_ratio: float = 10.0) -> torch.Tensor:
     """
     Computes class weights for Technique Classification based on label distribution.
 
+    Uses sqrt-dampened inverse frequency weighting with a maximum cap.
+
     Args:
         train_dataset: Training dataset with 'labels' field
+        max_weight_ratio: Maximum ratio between highest and lowest weight (default: 10.0)
 
     Returns:
         torch.Tensor of shape (num_classes,) with weights for each technique
@@ -645,17 +657,24 @@ def compute_tc_class_weights(train_dataset: Dataset) -> torch.Tensor:
     total = sum(label_counts.values())
     num_classes = len(PROPAGANDA_TECHNIQUES)
 
-    # Compute inverse frequency weights
+    # Compute sqrt-dampened inverse frequency weights
     weights = []
     for i in range(num_classes):
         count = label_counts.get(i, 1)  # Avoid division by zero
-        weight = total / (num_classes * count)
+        weight = np.sqrt(total / (num_classes * count))
         weights.append(weight)
 
-    weights = torch.tensor(weights, dtype=torch.float32)
+    weights = np.array(weights)
 
-    # Normalize weights
-    weights = weights / weights.sum() * num_classes
+    # Cap the maximum weight ratio
+    min_weight = weights.min()
+    max_allowed = min_weight * max_weight_ratio
+    weights = np.clip(weights, None, max_allowed)
+
+    # Normalize so minimum weight is 1.0
+    weights = weights / weights.min()
+
+    weights = torch.tensor(weights, dtype=torch.float32)
 
     # Log class distribution
     logger.info("TC Class distribution:")
@@ -820,7 +839,7 @@ def train_span_identification(
     class_weights = None
     if training_config.use_class_weights:
         logger.info("    Computing SI class weights...")
-        class_weights = compute_si_class_weights(train_ds)
+        class_weights = compute_si_class_weights(train_ds, training_config.max_class_weight_ratio)
 
     # Initialize model (3 labels: O, B-PROP, I-PROP)
     model = AutoModelForTokenClassification.from_pretrained(
@@ -941,7 +960,7 @@ def train_technique_classification(
     class_weights = None
     if training_config.use_class_weights:
         logger.info("    Computing TC class weights...")
-        class_weights = compute_tc_class_weights(train_ds)
+        class_weights = compute_tc_class_weights(train_ds, training_config.max_class_weight_ratio)
 
     # Initialize model
     model = AutoModelForSequenceClassification.from_pretrained(
