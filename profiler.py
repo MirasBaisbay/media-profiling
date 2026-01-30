@@ -242,7 +242,7 @@ def report_node(state: ProfilerState) -> Dict:
 
     # === Calculate Overall Credibility (0-10 scale) ===
     cred_score, cred_level, f_pts, b_pts = ScoringCalculator.calculate_credibility(
-        fact_label=fact_label,
+        factuality_label=fact_label,
         bias_label=bias_label,
         traffic_points=state["traffic_data"]["points"],
         freedom_penalty=state["freedom_data"]["penalty"]
