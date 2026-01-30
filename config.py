@@ -194,7 +194,12 @@ class TrainingConfig:
     learning_rate_tc: float = 3e-5
     batch_size_si: int = 8
     batch_size_tc: int = 16
-    num_epochs_si: int = 1
-    num_epochs_tc: int = 1
+    num_epochs_si: int = 8  # Increased from 1 - SI needs more epochs for imbalanced data
+    num_epochs_tc: int = 5  # Increased from 1 - TC needs more epochs for 14 classes
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
+    use_class_weights: bool = True  # Enable class weighting for imbalanced data
+    use_focal_loss: bool = True  # Use focal loss for better handling of hard examples
+    focal_loss_gamma: float = 2.0  # Focal loss focusing parameter
+    si_early_stopping_patience: int = 3  # Patience for early stopping
+    tc_early_stopping_patience: int = 3  # Patience for early stopping

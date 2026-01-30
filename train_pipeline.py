@@ -34,6 +34,9 @@ from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from collections import Counter
 from datasets import Dataset, DatasetDict
 from transformers import (
     AutoTokenizer,
@@ -576,7 +579,212 @@ def compute_tc_metrics(eval_pred):
 
 
 # =============================================================================
-# 5. TRAINING FUNCTIONS
+# 5. CLASS WEIGHTS AND CUSTOM TRAINERS
+# =============================================================================
+
+def compute_si_class_weights(train_dataset: Dataset) -> torch.Tensor:
+    """
+    Computes class weights for Span Identification based on label distribution.
+
+    Uses inverse frequency weighting to handle severe class imbalance
+    where "O" tokens vastly outnumber "B-PROP" and "I-PROP" tokens.
+
+    Args:
+        train_dataset: Training dataset with 'labels' field
+
+    Returns:
+        torch.Tensor of shape (3,) with weights for [O, B-PROP, I-PROP]
+    """
+    label_counts = Counter()
+
+    for example in train_dataset:
+        labels = example["labels"]
+        for label in labels:
+            if label != -100:  # Skip ignored tokens
+                label_counts[label] += 1
+
+    total = sum(label_counts.values())
+    num_classes = 3  # O, B-PROP, I-PROP
+
+    # Compute inverse frequency weights
+    weights = []
+    for i in range(num_classes):
+        count = label_counts.get(i, 1)  # Avoid division by zero
+        # Use smoothed inverse frequency: total / (num_classes * count)
+        weight = total / (num_classes * count)
+        weights.append(weight)
+
+    weights = torch.tensor(weights, dtype=torch.float32)
+
+    # Normalize weights so they sum to num_classes
+    weights = weights / weights.sum() * num_classes
+
+    logger.info(f"SI Class distribution: O={label_counts.get(0, 0)}, "
+                f"B-PROP={label_counts.get(1, 0)}, I-PROP={label_counts.get(2, 0)}")
+    logger.info(f"SI Class weights: O={weights[0]:.3f}, B-PROP={weights[1]:.3f}, I-PROP={weights[2]:.3f}")
+
+    return weights
+
+
+def compute_tc_class_weights(train_dataset: Dataset) -> torch.Tensor:
+    """
+    Computes class weights for Technique Classification based on label distribution.
+
+    Args:
+        train_dataset: Training dataset with 'labels' field
+
+    Returns:
+        torch.Tensor of shape (num_classes,) with weights for each technique
+    """
+    label_counts = Counter()
+
+    for example in train_dataset:
+        label = example["labels"]
+        label_counts[label] += 1
+
+    total = sum(label_counts.values())
+    num_classes = len(PROPAGANDA_TECHNIQUES)
+
+    # Compute inverse frequency weights
+    weights = []
+    for i in range(num_classes):
+        count = label_counts.get(i, 1)  # Avoid division by zero
+        weight = total / (num_classes * count)
+        weights.append(weight)
+
+    weights = torch.tensor(weights, dtype=torch.float32)
+
+    # Normalize weights
+    weights = weights / weights.sum() * num_classes
+
+    # Log class distribution
+    logger.info("TC Class distribution:")
+    for i, technique in enumerate(PROPAGANDA_TECHNIQUES):
+        logger.info(f"  {technique}: {label_counts.get(i, 0)} samples, weight={weights[i]:.3f}")
+
+    return weights
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for handling class imbalance.
+
+    Focal loss down-weights easy examples and focuses on hard misclassified examples.
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+
+    Args:
+        weight: Class weights tensor
+        gamma: Focusing parameter (default=2.0)
+        reduction: 'mean' or 'sum'
+    """
+    def __init__(self, weight=None, gamma=2.0, reduction='mean', ignore_index=-100):
+        super().__init__()
+        self.weight = weight
+        self.gamma = gamma
+        self.reduction = reduction
+        self.ignore_index = ignore_index
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(
+            inputs, targets,
+            weight=self.weight,
+            reduction='none',
+            ignore_index=self.ignore_index
+        )
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        return focal_loss
+
+
+class WeightedSITrainer(Trainer):
+    """
+    Custom Trainer for Span Identification with class-weighted loss.
+
+    Handles the severe class imbalance between O/B-PROP/I-PROP tokens.
+    """
+    def __init__(self, class_weights=None, use_focal_loss=False, focal_gamma=2.0, **kwargs):
+        super().__init__(**kwargs)
+        self.class_weights = class_weights
+        self.use_focal_loss = use_focal_loss
+        self.focal_gamma = focal_gamma
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        # Reshape for loss computation
+        # logits: (batch, seq_len, num_classes) -> (batch * seq_len, num_classes)
+        # labels: (batch, seq_len) -> (batch * seq_len)
+        logits_flat = logits.view(-1, logits.size(-1))
+        labels_flat = labels.view(-1)
+
+        # Move class weights to correct device
+        if self.class_weights is not None:
+            weights = self.class_weights.to(logits.device)
+        else:
+            weights = None
+
+        if self.use_focal_loss:
+            loss_fct = FocalLoss(
+                weight=weights,
+                gamma=self.focal_gamma,
+                ignore_index=-100
+            )
+            loss = loss_fct(logits_flat, labels_flat)
+        else:
+            loss = F.cross_entropy(
+                logits_flat,
+                labels_flat,
+                weight=weights,
+                ignore_index=-100
+            )
+
+        return (loss, outputs) if return_outputs else loss
+
+
+class WeightedTCTrainer(Trainer):
+    """
+    Custom Trainer for Technique Classification with class-weighted loss.
+
+    Handles class imbalance among the 14 propaganda techniques.
+    """
+    def __init__(self, class_weights=None, use_focal_loss=False, focal_gamma=2.0, **kwargs):
+        super().__init__(**kwargs)
+        self.class_weights = class_weights
+        self.use_focal_loss = use_focal_loss
+        self.focal_gamma = focal_gamma
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        # Move class weights to correct device
+        if self.class_weights is not None:
+            weights = self.class_weights.to(logits.device)
+        else:
+            weights = None
+
+        if self.use_focal_loss:
+            loss_fct = FocalLoss(
+                weight=weights,
+                gamma=self.focal_gamma
+            )
+            loss = loss_fct(logits, labels)
+        else:
+            loss = F.cross_entropy(logits, labels, weight=weights)
+
+        return (loss, outputs) if return_outputs else loss
+
+
+# =============================================================================
+# 6. TRAINING FUNCTIONS
 # =============================================================================
 
 def train_span_identification(
@@ -586,6 +794,9 @@ def train_span_identification(
 ) -> None:
     """
     Trains the Span Identification model using BIO tagging.
+
+    Uses class-weighted loss and optional focal loss to handle the severe
+    class imbalance between O/B-PROP/I-PROP tokens.
 
     Args:
         train_data: Training articles with labels
@@ -604,6 +815,12 @@ def train_span_identification(
     if len(train_ds) == 0:
         logger.error("No training data for SI. Skipping.")
         return
+
+    # Compute class weights for handling imbalance
+    class_weights = None
+    if training_config.use_class_weights:
+        logger.info("    Computing SI class weights...")
+        class_weights = compute_si_class_weights(train_ds)
 
     # Initialize model (3 labels: O, B-PROP, I-PROP)
     model = AutoModelForTokenClassification.from_pretrained(
@@ -628,7 +845,7 @@ def train_span_identification(
         metric_for_best_model="f1",
         greater_is_better=True,
         logging_dir=f"{training_config.si_model_dir}/logs",
-        logging_steps=100,
+        logging_steps=50,  # More frequent logging
         report_to="none",
     )
 
@@ -636,20 +853,41 @@ def train_span_identification(
     data_collator = DataCollatorForTokenClassification(tokenizer)
 
     # Remove non-tensor columns for training
-    train_ds = train_ds.remove_columns(["article_id"])
-    val_ds = val_ds.remove_columns(["article_id"])
+    train_ds_clean = train_ds.remove_columns(["article_id"])
+    val_ds_clean = val_ds.remove_columns(["article_id"])
 
-    # Initialize trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_ds,
-        eval_dataset=val_ds,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_si_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
-    )
+    # Initialize custom weighted trainer
+    if training_config.use_class_weights or training_config.use_focal_loss:
+        logger.info(f"    Using weighted trainer (focal_loss={training_config.use_focal_loss}, "
+                    f"gamma={training_config.focal_loss_gamma})")
+        trainer = WeightedSITrainer(
+            class_weights=class_weights,
+            use_focal_loss=training_config.use_focal_loss,
+            focal_gamma=training_config.focal_loss_gamma,
+            model=model,
+            args=training_args,
+            train_dataset=train_ds_clean,
+            eval_dataset=val_ds_clean,
+            processing_class=tokenizer,
+            data_collator=data_collator,
+            compute_metrics=compute_si_metrics,
+            callbacks=[EarlyStoppingCallback(
+                early_stopping_patience=training_config.si_early_stopping_patience
+            )],
+        )
+    else:
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_ds_clean,
+            eval_dataset=val_ds_clean,
+            processing_class=tokenizer,
+            data_collator=data_collator,
+            compute_metrics=compute_si_metrics,
+            callbacks=[EarlyStoppingCallback(
+                early_stopping_patience=training_config.si_early_stopping_patience
+            )],
+        )
 
     # Train
     trainer.train()
@@ -667,6 +905,9 @@ def train_technique_classification(
 ) -> None:
     """
     Trains the Technique Classification model.
+
+    Uses class-weighted loss and optional focal loss to handle class
+    imbalance among the 14 propaganda techniques.
 
     Args:
         train_data: Training articles with labels
@@ -696,6 +937,12 @@ def train_technique_classification(
         logger.error("No training data for TC. Skipping.")
         return
 
+    # Compute class weights for handling imbalance
+    class_weights = None
+    if training_config.use_class_weights:
+        logger.info("    Computing TC class weights...")
+        class_weights = compute_tc_class_weights(train_ds)
+
     # Initialize model
     model = AutoModelForSequenceClassification.from_pretrained(
         model_config.model_checkpoint,
@@ -719,25 +966,45 @@ def train_technique_classification(
         metric_for_best_model="f1_micro",
         greater_is_better=True,
         logging_dir=f"{training_config.tc_model_dir}/logs",
-        logging_steps=100,
+        logging_steps=50,  # More frequent logging
         report_to="none",
     )
 
     # Remove non-tensor columns for training
     columns_to_remove = ["article_id", "snippet", "technique_name"]
-    train_ds = train_ds.remove_columns(columns_to_remove)
-    val_ds = val_ds.remove_columns(columns_to_remove)
+    train_ds_clean = train_ds.remove_columns(columns_to_remove)
+    val_ds_clean = val_ds.remove_columns(columns_to_remove)
 
-    # Initialize trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_ds,
-        eval_dataset=val_ds,
-        tokenizer=tokenizer,
-        compute_metrics=compute_tc_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
-    )
+    # Initialize custom weighted trainer
+    if training_config.use_class_weights or training_config.use_focal_loss:
+        logger.info(f"    Using weighted trainer (focal_loss={training_config.use_focal_loss}, "
+                    f"gamma={training_config.focal_loss_gamma})")
+        trainer = WeightedTCTrainer(
+            class_weights=class_weights,
+            use_focal_loss=training_config.use_focal_loss,
+            focal_gamma=training_config.focal_loss_gamma,
+            model=model,
+            args=training_args,
+            train_dataset=train_ds_clean,
+            eval_dataset=val_ds_clean,
+            processing_class=tokenizer,
+            compute_metrics=compute_tc_metrics,
+            callbacks=[EarlyStoppingCallback(
+                early_stopping_patience=training_config.tc_early_stopping_patience
+            )],
+        )
+    else:
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_ds_clean,
+            eval_dataset=val_ds_clean,
+            processing_class=tokenizer,
+            compute_metrics=compute_tc_metrics,
+            callbacks=[EarlyStoppingCallback(
+                early_stopping_patience=training_config.tc_early_stopping_patience
+            )],
+        )
 
     # Train
     trainer.train()
@@ -749,7 +1016,7 @@ def train_technique_classification(
 
 
 # =============================================================================
-# 6. MAIN PIPELINE
+# 7. MAIN PIPELINE
 # =============================================================================
 
 def main():
