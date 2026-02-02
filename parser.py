@@ -42,6 +42,45 @@ def get_existing_urls():
     with open(URLS_FILE, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip()]
 
+def is_valid_source_url(url):
+    """
+    Validates if a URL is a valid MBFC source page (not a category/meta page).
+    """
+    if not url or "mediabiasfactcheck.com" not in url:
+        return False
+
+    # Exclude category pages, meta pages, and non-source URLs
+    exclude_patterns = [
+        '/left/', '/leftcenter/', '/center/', '/right-center/', '/right/',
+        '/extremeleft/', '/extremeright/',
+        '/conspiracy/', '/pro-science/', '/satire/', '/fake-news/',
+        '/methodology/', '/about/', '/contact/', '/privacy-policy/',
+        '/filtered-search/', '/re-evaluated-sources/',
+        '/category/', '/tag/', '/page/', '/author/',
+        '/wp-content/', '/wp-admin/', '/feed/',
+        '/#', '/search/', '/login/', '/register/',
+        '/mbfc-ratings-by-the-numbers/',
+        'mediabiasfactcheck.com/?', # Query strings on homepage
+    ]
+
+    for pattern in exclude_patterns:
+        if pattern in url.lower():
+            return False
+
+    # Must be a direct source page (e.g., /source-name/)
+    # Valid URLs look like: https://mediabiasfactcheck.com/cnn/
+    if url.endswith('/') or url.endswith('.html') or url.endswith('.htm'):
+        # Check it has a slug (not just the domain)
+        parts = url.rstrip('/').split('/')
+        if len(parts) >= 4:  # https://mediabiasfactcheck.com/slug
+            slug = parts[-1]
+            # Slug should be alphanumeric with hyphens, not empty
+            if slug and len(slug) > 1 and re.match(r'^[a-zA-Z0-9\-]+$', slug):
+                return True
+
+    return False
+
+
 def get_soup(url):
     """
     Fetches URL using Cloudscraper to bypass 403/429/Disconnects.
@@ -71,15 +110,29 @@ def get_soup(url):
 
 def collect_urls():
     """Scrapes category pages and saves URLs incrementally."""
+    # COMPLETE list of all MBFC category pages
+    # Based on MBFC statistics: 10,151 total sources reviewed
     categories = {
-        'left': 'https://mediabiasfactcheck.com/left/',
-        'left-center': 'https://mediabiasfactcheck.com/leftcenter/',
-        'center': 'https://mediabiasfactcheck.com/center/',
-        'right-center': 'https://mediabiasfactcheck.com/right-center/',
-        'right': 'https://mediabiasfactcheck.com/right/',
-        'conspiracy': 'https://mediabiasfactcheck.com/conspiracy/',
-        'pro-science': 'https://mediabiasfactcheck.com/pro-science/',
-        'satire': 'https://mediabiasfactcheck.com/satire/'
+        # Bias Rating Categories (should total ~9,931 based on stats)
+        'extreme-left': 'https://mediabiasfactcheck.com/extremeleft/',        # Part of Left Biased (854 total)
+        'left': 'https://mediabiasfactcheck.com/left/',                        # Left Biased sources
+        'left-center': 'https://mediabiasfactcheck.com/leftcenter/',          # 2,128 sources
+        'center': 'https://mediabiasfactcheck.com/center/',                    # 3,032 sources (Least Biased)
+        'right-center': 'https://mediabiasfactcheck.com/right-center/',       # 1,869 sources
+        'right': 'https://mediabiasfactcheck.com/right/',                      # Right Biased sources
+        'extreme-right': 'https://mediabiasfactcheck.com/extremeright/',      # Part of Right Biased (2,048 total)
+
+        # Special Categories
+        'questionable': 'https://mediabiasfactcheck.com/fake-news/',           # Questionable Sources (~2,991)
+        'conspiracy': 'https://mediabiasfactcheck.com/conspiracy/',            # Conspiracy/Pseudoscience
+        'pro-science': 'https://mediabiasfactcheck.com/pro-science/',          # Pro-Science sources
+        'satire': 'https://mediabiasfactcheck.com/satire/',                    # Satire sources
+
+        # Re-evaluated sources (sources that changed ratings)
+        're-evaluated': 'https://mediabiasfactcheck.com/re-evaluated-sources/',
+
+        # Additional filtered pages that may have unique sources
+        'filtered-search': 'https://mediabiasfactcheck.com/filtered-search/',
     }
 
     print("--- Step 1: Collecting Source URLs ---")
@@ -90,42 +143,154 @@ def collect_urls():
 
     for cat_name, cat_url in categories.items():
         print(f"\nScanning Category: {cat_name}...")
-        
-        soup = get_soup(cat_url)
-        if not soup:
-            print(f"  [X] Failed to load {cat_name}. Skipping.")
-            continue
-        
-        new_links = set()
-        
-        # Method 1: Table
-        table = soup.find('table', {'id': 'mbfc-table'})
-        if table:
-            rows = table.find_all('tr')
-            for row in rows:
-                link = row.find('a')
-                if link and 'href' in link.attrs:
-                    url = link['href']
-                    if "mediabiasfactcheck.com" in url:
-                        new_links.add(url)
-        
-        # Method 2: Content Div (Fallback)
-        else:
+
+        # Handle pagination - scrape all pages for this category
+        page_num = 1
+        total_links_in_category = set()
+
+        while True:
+            # Construct URL for current page
+            if page_num == 1:
+                current_url = cat_url
+            else:
+                # MBFC uses /page/N/ for pagination
+                current_url = cat_url.rstrip('/') + f'/page/{page_num}/'
+
+            soup = get_soup(current_url)
+            if not soup:
+                if page_num == 1:
+                    print(f"  [X] Failed to load {cat_name}. Skipping.")
+                break
+
+            new_links = set()
+
+            # Method 1: Table with ID 'mbfc-table'
+            table = soup.find('table', {'id': 'mbfc-table'})
+            if table:
+                rows = table.find_all('tr')
+                for row in rows:
+                    link = row.find('a')
+                    if link and 'href' in link.attrs:
+                        url = link['href']
+                        if is_valid_source_url(url):
+                            new_links.add(url)
+
+            # Method 2: Any table on the page (some pages use different table structures)
+            all_tables = soup.find_all('table')
+            for tbl in all_tables:
+                rows = tbl.find_all('tr')
+                for row in rows:
+                    links = row.find_all('a')
+                    for link in links:
+                        if 'href' in link.attrs:
+                            url = link['href']
+                            if is_valid_source_url(url):
+                                new_links.add(url)
+
+            # Method 3: Content Div (catches sources listed as plain links)
             entry_content = soup.find('div', class_='entry-content')
             if entry_content:
                 links = entry_content.find_all('a')
                 for link in links:
                     if 'href' in link.attrs:
                         url = link['href']
-                        if "mediabiasfactcheck.com" in url and len(url) > 30:
+                        if is_valid_source_url(url):
                             new_links.add(url)
 
+            # Method 4: Scan entire page for any MBFC source links
+            all_links = soup.find_all('a')
+            for link in all_links:
+                if 'href' in link.attrs:
+                    url = link['href']
+                    if is_valid_source_url(url):
+                        new_links.add(url)
+
+            # If no new links found on this page, stop pagination
+            new_unique = new_links - total_links_in_category
+            if not new_unique and page_num > 1:
+                break
+
+            total_links_in_category.update(new_links)
+
+            # Check if there's a next page link
+            next_page = soup.find('a', class_='next') or soup.find('a', string=re.compile(r'Next|›|»'))
+            if not next_page and page_num > 1:
+                break
+
+            if page_num > 1:
+                print(f"    Page {page_num}: +{len(new_unique)} sources")
+
+            page_num += 1
+
+            # Safety limit to prevent infinite loops
+            if page_num > 100:
+                print(f"  [!] Hit page limit (100) for {cat_name}")
+                break
+
         # Save immediately!
-        added_count = save_urls_to_file(new_links)
-        print(f"  > Found {len(new_links)} links. ({added_count} new ones saved to file)")
+        added_count = save_urls_to_file(total_links_in_category)
+        print(f"  > Found {len(total_links_in_category)} links across {page_num-1} page(s). ({added_count} new ones saved to file)")
 
     print("\nURL Collection Complete.")
     return get_existing_urls()
+
+def print_statistics():
+    """Prints statistics about collected URLs and parsed data."""
+    print("\n" + "="*60)
+    print("MBFC DATA COLLECTION STATISTICS")
+    print("="*60)
+
+    # URL Statistics
+    urls = get_existing_urls()
+    print(f"\nTotal URLs Collected: {len(urls)}")
+
+    # If we have parsed data, show bias category breakdown
+    if os.path.exists(DATA_FILE):
+        try:
+            df = pd.read_csv(DATA_FILE)
+            print(f"Total Sources Parsed: {len(df)}")
+
+            print("\n--- BIAS RATING BREAKDOWN ---")
+            if 'bias_rating' in df.columns:
+                bias_counts = df['bias_rating'].value_counts(dropna=False)
+                for bias, count in bias_counts.items():
+                    bias_label = bias if pd.notna(bias) else "Unknown/Not Parsed"
+                    print(f"  {bias_label}: {count}")
+
+            print("\n--- FACTUAL REPORTING BREAKDOWN ---")
+            if 'factual_reporting' in df.columns:
+                factual_counts = df['factual_reporting'].value_counts(dropna=False)
+                for factual, count in factual_counts.items():
+                    factual_label = factual if pd.notna(factual) else "Unknown/Not Parsed"
+                    print(f"  {factual_label}: {count}")
+
+            print("\n--- CREDIBILITY BREAKDOWN ---")
+            if 'credibility' in df.columns:
+                cred_counts = df['credibility'].value_counts(dropna=False)
+                for cred, count in cred_counts.items():
+                    cred_label = cred if pd.notna(cred) else "Unknown/Not Parsed"
+                    print(f"  {cred_label}: {count}")
+
+            print("\n--- COUNTRY BREAKDOWN (Top 10) ---")
+            if 'country' in df.columns:
+                country_counts = df['country'].value_counts(dropna=False).head(10)
+                for country, count in country_counts.items():
+                    country_label = country if pd.notna(country) else "Unknown"
+                    print(f"  {country_label}: {count}")
+
+        except Exception as e:
+            print(f"Could not load parsed data: {e}")
+    else:
+        print("No parsed data file found yet.")
+
+    print("\n" + "="*60)
+    print("EXPECTED vs ACTUAL (from MBFC website stats)")
+    print("="*60)
+    print(f"Expected Total Sources: 10,151")
+    print(f"Collected URLs:         {len(urls)}")
+    print(f"Missing:                {10151 - len(urls)}")
+    print("="*60 + "\n")
+
 
 def parse_source_page(url):
     soup = get_soup(url)
@@ -158,21 +323,46 @@ def parse_source_page(url):
 
     return data
 
-def main():
+def main(mode='full', test_limit=20):
+    """
+    Main function to collect and parse MBFC data.
+
+    Args:
+        mode: 'full' - collect URLs and parse sources
+              'urls_only' - only collect URLs (no parsing)
+              'parse_only' - only parse (use existing URLs)
+              'stats_only' - only show statistics
+        test_limit: Number of sources to parse in test mode (default: 20)
+                   Set to None or 0 for full parsing
+    """
+    if mode == 'stats_only':
+        print_statistics()
+        return
+
     # 1. Collect URLs (or load existing ones if we crashed previously)
-    all_urls = collect_urls()
-    
+    if mode in ['full', 'urls_only']:
+        all_urls = collect_urls()
+    else:
+        all_urls = get_existing_urls()
+
     if not all_urls:
         print("No URLs found. Exiting.")
         return
 
+    # Show statistics after URL collection
+    print_statistics()
+
+    if mode == 'urls_only':
+        print("URL collection complete. Skipping parsing.")
+        return
+
     # 2. Parse Sources
     print(f"\n--- Step 2: Parsing {len(all_urls)} Sources ---")
-    
+
     # Load already parsed results to avoid re-doing work
     parsed_urls = set()
     results = []
-    
+
     if os.path.exists(DATA_FILE):
         try:
             existing_df = pd.read_csv(DATA_FILE)
@@ -184,25 +374,60 @@ def main():
 
     # Only process URLs we haven't parsed yet
     urls_to_process = [u for u in all_urls if u not in parsed_urls]
-    
-    # TEST MODE: Process only first 20 new ones
-    # Remove [:20] when you are ready for the full run
-    urls_to_process = urls_to_process[:20]
+
+    # Apply test limit if specified
+    if test_limit and test_limit > 0:
+        print(f"\n*** TEST MODE: Processing only {test_limit} sources ***")
+        print(f"*** Set test_limit=0 in main() for full parsing ***\n")
+        urls_to_process = urls_to_process[:test_limit]
+
+    if not urls_to_process:
+        print("All URLs have already been parsed.")
+        print_statistics()
+        return
 
     for i, url in enumerate(urls_to_process):
         print(f"[{i+1}/{len(urls_to_process)}] Parsing: {url}")
-        
+
         info = parse_source_page(url)
         if info:
             results.append(info)
-        
+
         # Save every 5 items
-        if i % 5 == 0:
+        if (i + 1) % 5 == 0:
             pd.DataFrame(results).to_csv(DATA_FILE, index=False)
+            print(f"  [Checkpoint] Saved {len(results)} records")
 
     # Final Save
     pd.DataFrame(results).to_csv(DATA_FILE, index=False)
-    print(f"Done! Saved to {DATA_FILE}")
+    print(f"\nDone! Saved {len(results)} records to {DATA_FILE}")
+
+    # Show final statistics
+    print_statistics()
+
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    # Parse command line arguments
+    if len(sys.argv) > 1:
+        arg = sys.argv[1].lower()
+        if arg == 'stats':
+            main(mode='stats_only')
+        elif arg == 'urls':
+            main(mode='urls_only')
+        elif arg == 'parse':
+            main(mode='parse_only')
+        elif arg == 'full':
+            # Full mode with no limit
+            main(mode='full', test_limit=0)
+        else:
+            print("Usage: python parser.py [stats|urls|parse|full]")
+            print("  stats  - Show statistics only")
+            print("  urls   - Collect URLs only (no parsing)")
+            print("  parse  - Parse existing URLs only")
+            print("  full   - Full run (collect + parse ALL sources)")
+            print("  (no args) - Test mode: collect URLs + parse 20 sources")
+    else:
+        # Default: test mode with 20 sources
+        main(mode='full', test_limit=20)
