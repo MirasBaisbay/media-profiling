@@ -111,28 +111,30 @@ def get_soup(url):
 def collect_urls():
     """Scrapes category pages and saves URLs incrementally."""
     # COMPLETE list of all MBFC category pages
-    # Based on MBFC statistics: 10,151 total sources reviewed
-    categories = {
-        # Bias Rating Categories (should total ~9,931 based on stats)
-        'extreme-left': 'https://mediabiasfactcheck.com/extremeleft/',        # Part of Left Biased (854 total)
-        'left': 'https://mediabiasfactcheck.com/left/',                        # Left Biased sources
-        'left-center': 'https://mediabiasfactcheck.com/leftcenter/',          # 2,128 sources
-        'center': 'https://mediabiasfactcheck.com/center/',                    # 3,032 sources (Least Biased)
-        'right-center': 'https://mediabiasfactcheck.com/right-center/',       # 1,869 sources
-        'right': 'https://mediabiasfactcheck.com/right/',                      # Right Biased sources
-        'extreme-right': 'https://mediabiasfactcheck.com/extremeright/',      # Part of Right Biased (2,048 total)
+    # Note: "extreme left" and "extreme right" are NOT separate pages -
+    # they are included within the /left/ and /right/ categories
+    #
+    # MBFC Statistics (for reference):
+    # - Total Sources Reviewed: 10,151 (includes inactive)
+    # - Total Live Sources: 9,251
+    # - Categories overlap (a source can be in both "right" AND "questionable")
 
-        # Special Categories
-        'questionable': 'https://mediabiasfactcheck.com/fake-news/',           # Questionable Sources (~2,991)
+    categories = {
+        # Bias Rating Categories
+        'left': 'https://mediabiasfactcheck.com/left/',                        # Left + Extreme Left
+        'left-center': 'https://mediabiasfactcheck.com/leftcenter/',          # Left-Center
+        'center': 'https://mediabiasfactcheck.com/center/',                    # Least Biased
+        'right-center': 'https://mediabiasfactcheck.com/right-center/',       # Right-Center
+        'right': 'https://mediabiasfactcheck.com/right/',                      # Right + Extreme Right
+
+        # Special Categories (may overlap with bias categories)
+        'questionable': 'https://mediabiasfactcheck.com/fake-news/',           # Questionable/Low Credibility
         'conspiracy': 'https://mediabiasfactcheck.com/conspiracy/',            # Conspiracy/Pseudoscience
-        'pro-science': 'https://mediabiasfactcheck.com/pro-science/',          # Pro-Science sources
-        'satire': 'https://mediabiasfactcheck.com/satire/',                    # Satire sources
+        'pro-science': 'https://mediabiasfactcheck.com/pro-science/',          # Pro-Science
+        'satire': 'https://mediabiasfactcheck.com/satire/',                    # Satire
 
         # Re-evaluated sources (sources that changed ratings)
         're-evaluated': 'https://mediabiasfactcheck.com/re-evaluated-sources/',
-
-        # Additional filtered pages that may have unique sources
-        'filtered-search': 'https://mediabiasfactcheck.com/filtered-search/',
     }
 
     print("--- Step 1: Collecting Source URLs ---")
@@ -286,9 +288,13 @@ def print_statistics():
     print("\n" + "="*60)
     print("EXPECTED vs ACTUAL (from MBFC website stats)")
     print("="*60)
-    print(f"Expected Total Sources: 10,151")
-    print(f"Collected URLs:         {len(urls)}")
-    print(f"Missing:                {10151 - len(urls)}")
+    print(f"Expected Total Sources (all-time):  10,151")
+    print(f"Expected Live Sources:              9,251")
+    print(f"Collected URLs:                     {len(urls)}")
+    if len(urls) >= 9251:
+        print(f"Status: COMPLETE ({len(urls) - 9251} extra from overlapping categories)")
+    else:
+        print(f"Missing from live sources:          {9251 - len(urls)}")
     print("="*60 + "\n")
 
 
