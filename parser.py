@@ -407,8 +407,8 @@ def parse_source_page(url):
 
     # === EXTRACT DETAILED REPORT FIELDS ===
 
-    # Bias Rating with score: "LEFT (-6.8)" or "LEAST BIASED (-0.1)"
-    bias_match = re.search(r'Bias Rating:\s*([A-Z\-\s]+)\s*\(([+-]?\d+\.?\d*)\)', full_text)
+    # Bias Rating with score: "LEFT (-6.8)" or just "LEFT"
+    bias_match = re.search(r'Bias Rating:\s*([A-Z\-\s]+?)\s*\(([+-]?\d+\.?\d*)\)', full_text)
     if bias_match:
         data['bias_rating'] = bias_match.group(1).strip()
         try:
@@ -417,12 +417,12 @@ def parse_source_page(url):
             pass
     else:
         # Fallback: just get the rating without score
-        bias_match = re.search(r'Bias Rating:\s*([A-Z\-\s]+?)(?=Factual|Country|MBFC|Media|Traffic|$)', full_text)
+        bias_match = re.search(r'Bias Rating:\s*([A-Z][A-Z\-\s]*?)(?:\s*Factual|\s*Country|\s*Press|\s*MBFC|\s*Media|\s*Traffic|$)', full_text)
         if bias_match:
             data['bias_rating'] = bias_match.group(1).strip()
 
-    # Factual Reporting with score: "MIXED (5.0)" or "HIGH (1.5)"
-    factual_match = re.search(r'Factual Reporting:\s*([A-Z\s]+)\s*\(([+-]?\d+\.?\d*)\)', full_text)
+    # Factual Reporting with score: "MIXED (5.0)" or just "HIGH"
+    factual_match = re.search(r'Factual Reporting:\s*([A-Z][A-Z\s]*?)\s*\(([+-]?\d+\.?\d*)\)', full_text)
     if factual_match:
         data['factual_reporting'] = factual_match.group(1).strip()
         try:
@@ -430,32 +430,32 @@ def parse_source_page(url):
         except:
             pass
     else:
-        factual_match = re.search(r'Factual Reporting:\s*([A-Z\s]+?)(?=Country|MBFC|Media|Traffic|$)', full_text)
+        factual_match = re.search(r'Factual Reporting:\s*([A-Z][A-Z\s]*?)(?:\s*Country|\s*Press|\s*MBFC|\s*Media|\s*Traffic|$)', full_text)
         if factual_match:
             data['factual_reporting'] = factual_match.group(1).strip()
 
-    # Country
-    country_match = re.search(r'Country:\s*([A-Za-z\s,]+?)(?=MBFC|Media|Traffic|$)', full_text)
+    # Country - be more specific with the pattern
+    country_match = re.search(r'Country:\s*([A-Za-z][A-Za-z\s,]*?)(?:\s*Press Freedom|\s*MBFC|\s*Media Type|\s*Traffic|$)', full_text)
     if country_match:
         data['country'] = country_match.group(1).strip()
 
-    # Country Freedom Rating
-    freedom_match = re.search(r"MBFC's Country Freedom (?:Rating|Rank):\s*([A-Z\s]+?)(?=Media|Traffic|MBFC|$)", full_text)
+    # Press Freedom Rating (MBFC uses both "Press Freedom Rating" and "MBFC's Country Freedom Rating/Rank")
+    freedom_match = re.search(r'(?:Press Freedom Rating|MBFC\'s Country Freedom (?:Rating|Rank)):\s*([A-Z][A-Z\s]*?)(?:\s*Media Type|\s*Traffic|\s*MBFC Credibility|$)', full_text)
     if freedom_match:
         data['country_freedom_rating'] = freedom_match.group(1).strip()
 
     # Media Type
-    media_match = re.search(r'Media Type:\s*([A-Za-z\s/,]+?)(?=Traffic|MBFC|Credibility|$)', full_text)
+    media_match = re.search(r'Media Type:\s*([A-Za-z][A-Za-z\s/,]*?)(?:\s*Traffic|\s*MBFC Credibility|$)', full_text)
     if media_match:
         data['media_type'] = media_match.group(1).strip()
 
     # Traffic/Popularity
-    traffic_match = re.search(r'Traffic/Popularity:\s*([A-Za-z\s]+?)(?=MBFC|Credibility|$)', full_text)
+    traffic_match = re.search(r'Traffic/Popularity:\s*([A-Za-z][A-Za-z\s]*?)(?:\s*MBFC Credibility|\s*History|\s*Funded|$)', full_text)
     if traffic_match:
         data['traffic_popularity'] = traffic_match.group(1).strip()
 
     # Credibility Rating
-    cred_match = re.search(r'(?:MBFC )?Credibility Rating:\s*([A-Z\s]+?)(?=History|Funded|Analysis|Source|$)', full_text)
+    cred_match = re.search(r'MBFC Credibility Rating:\s*([A-Z][A-Z\s]*?)(?:\s*History|\s*Funded|\s*Analysis|\s*Source|$)', full_text)
     if cred_match:
         data['credibility_rating'] = cred_match.group(1).strip()
 
