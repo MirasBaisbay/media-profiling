@@ -913,3 +913,524 @@ class ScoringCalculator:
             level = "Low Credibility"
 
         return total, level, fact_pts, bias_pts
+
+
+# =============================================================================
+# IDEOLOGY DECISION TREE ANALYZER
+# =============================================================================
+
+@dataclass
+class TopicAnalysisResult:
+    """Result of analyzing a single topic."""
+    topic_name: str
+    is_relevant: bool  # From preliminary check
+    stance: Optional[str]  # "left", "right", or None
+    score: Optional[float]  # -10 to +10, or None if not relevant
+    matched_question_id: Optional[str]
+    evidence: str
+    references: List[Dict[str, str]]
+
+
+@dataclass
+class DimensionAnalysisResult:
+    """Result of analyzing a dimension (economic or social)."""
+    dimension_name: str
+    topic_results: List[TopicAnalysisResult]
+    average_score: Optional[float]  # Average of relevant topics, None if no relevant topics
+    relevant_topic_count: int
+
+
+@dataclass
+class IdeologyAnalysisResult:
+    """Complete result of ideology analysis."""
+    economic_analysis: DimensionAnalysisResult
+    social_analysis: DimensionAnalysisResult
+    combined_economic_score: Optional[float]
+    combined_social_score: Optional[float]
+    methodology_notes: str
+
+
+class IdeologyDecisionTreeAnalyzer:
+    """
+    Implements a recursive decision-tree approach to ideology detection.
+
+    Uses the ideology_question_bank.json to evaluate articles through:
+    1. Topic Filter: Run preliminary_check for each topic
+       - If NO: Score as None (exclude from average)
+       - If YES: Proceed to stance detection
+
+    2. Stance Detection (The Fork):
+       - Ask LLM: "Does this article lean LEFT or RIGHT on this topic?"
+       - If Left: Execute left_leaning branch starting from L1 (Extreme)
+       - If Right: Execute right_leaning branch starting from R4 (Extreme)
+
+    3. The "Stop" Condition (check extremes FIRST):
+       - Left Branch: L1 (-10) -> L2 (-7.5) -> L3 (-5) -> L4 (-2.5) -> Centrism
+       - Right Branch: R4 (+10) -> R3 (+7.5) -> R2 (+5) -> R1 (+2.5) -> Centrism
+
+    WHY CHECK EXTREMES FIRST:
+    If you ask the Moderate question first (e.g., "Do you support unions?"),
+    a Communist would say "Yes." You would incorrectly score them as -5 instead of -10.
+    """
+
+    def __init__(self, question_bank_path: str = "ideology_question_bank.json"):
+        self.question_bank = self._load_question_bank(question_bank_path)
+
+    def _load_question_bank(self, path: str) -> Dict[str, Any]:
+        """Load the ideology question bank from JSON file."""
+        try:
+            # Try relative path first
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            # Try path relative to this file
+            module_dir = os.path.dirname(os.path.abspath(__file__))
+            full_path = os.path.join(module_dir, path)
+            if os.path.exists(full_path):
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            logger.warning(f"Question bank not found at {path}")
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to load question bank: {e}")
+            return {}
+
+    def analyze(self, articles: List[Article]) -> IdeologyAnalysisResult:
+        """
+        Perform complete ideology analysis on articles.
+
+        Returns IdeologyAnalysisResult with scores for economic and social dimensions.
+        """
+        logger.info(f"Starting ideology decision tree analysis on {len(articles)} articles")
+
+        if not self.question_bank:
+            return IdeologyAnalysisResult(
+                economic_analysis=DimensionAnalysisResult("Economic System", [], None, 0),
+                social_analysis=DimensionAnalysisResult("Social Values", [], None, 0),
+                combined_economic_score=None,
+                combined_social_score=None,
+                methodology_notes="Question bank not loaded"
+            )
+
+        # Prepare article content for analysis
+        combined_text = self._prepare_article_text(articles)
+
+        # Analyze economic dimension
+        economic_result = self._analyze_dimension(
+            dimension_name="Economic System",
+            dimension_key="economic_system",
+            combined_text=combined_text,
+            branch_left_key="left_leaning",
+            branch_right_key="right_leaning"
+        )
+
+        # Analyze social dimension
+        social_result = self._analyze_dimension(
+            dimension_name="Social Values",
+            dimension_key="social_values",
+            combined_text=combined_text,
+            branch_left_key="progressive_leaning",
+            branch_right_key="conservative_leaning"
+        )
+
+        methodology_notes = self._build_methodology_notes(economic_result, social_result)
+
+        return IdeologyAnalysisResult(
+            economic_analysis=economic_result,
+            social_analysis=social_result,
+            combined_economic_score=economic_result.average_score,
+            combined_social_score=social_result.average_score,
+            methodology_notes=methodology_notes
+        )
+
+    def _prepare_article_text(self, articles: List[Article]) -> str:
+        """Prepare combined article text for analysis."""
+        texts = []
+        for article in articles[:10]:  # Limit to 10 articles
+            texts.append(f"HEADLINE: {article.title}\nCONTENT: {article.text[:800]}")
+        return "\n\n---\n\n".join(texts)
+
+    def _analyze_dimension(
+        self,
+        dimension_name: str,
+        dimension_key: str,
+        combined_text: str,
+        branch_left_key: str,
+        branch_right_key: str
+    ) -> DimensionAnalysisResult:
+        """Analyze a single dimension (economic or social)."""
+        topic_results = []
+
+        dimension_data = self.question_bank.get(dimension_key, {})
+        topics = dimension_data.get("topics", {})
+
+        for topic_name, topic_data in topics.items():
+            result = self._analyze_topic(
+                topic_name=topic_name,
+                topic_data=topic_data,
+                combined_text=combined_text,
+                branch_left_key=branch_left_key,
+                branch_right_key=branch_right_key
+            )
+            topic_results.append(result)
+
+        # Calculate average score from relevant topics
+        relevant_scores = [r.score for r in topic_results if r.is_relevant and r.score is not None]
+        average_score = sum(relevant_scores) / len(relevant_scores) if relevant_scores else None
+
+        return DimensionAnalysisResult(
+            dimension_name=dimension_name,
+            topic_results=topic_results,
+            average_score=round(average_score, 2) if average_score is not None else None,
+            relevant_topic_count=len(relevant_scores)
+        )
+
+    def _analyze_topic(
+        self,
+        topic_name: str,
+        topic_data: Dict[str, Any],
+        combined_text: str,
+        branch_left_key: str,
+        branch_right_key: str
+    ) -> TopicAnalysisResult:
+        """
+        Analyze a single topic using the decision tree.
+
+        Flow:
+        1. Preliminary check (topic filter)
+        2. Stance detection (left vs right)
+        3. Execute appropriate branch checking extremes first
+        """
+        # Step 1: Preliminary Check (Topic Filter)
+        preliminary = topic_data.get("preliminary_check", {})
+        is_relevant = self._run_preliminary_check(preliminary, combined_text, topic_name)
+
+        if not is_relevant:
+            return TopicAnalysisResult(
+                topic_name=topic_name,
+                is_relevant=False,
+                stance=None,
+                score=None,
+                matched_question_id=None,
+                evidence="Topic not discussed in articles",
+                references=[]
+            )
+
+        # Step 2: Stance Detection (The Fork)
+        stance = self._detect_stance(combined_text, topic_name)
+
+        # Step 3: Execute Branch (checking extremes FIRST)
+        branch_questions = topic_data.get("branch_questions", {})
+        centrism = branch_questions.get("centrism", {})
+
+        if stance == "left":
+            questions = branch_questions.get(branch_left_key, [])
+            # Left branch: L1 (extreme -10) -> L2 -> L3 -> L4 (moderate -2.5)
+            # Questions should already be ordered extreme to moderate in JSON
+            score, question_id, evidence, refs = self._execute_branch(
+                questions=questions,
+                combined_text=combined_text,
+                topic_name=topic_name,
+                order="extreme_first"
+            )
+        elif stance == "right":
+            questions = branch_questions.get(branch_right_key, [])
+            # Right branch: R4 (extreme +10) -> R3 -> R2 -> R1 (moderate +2.5)
+            # Need to reverse the order since JSON has R1 first
+            score, question_id, evidence, refs = self._execute_branch(
+                questions=questions,
+                combined_text=combined_text,
+                topic_name=topic_name,
+                order="extreme_first_reverse"  # Start from R4, not R1
+            )
+        else:
+            # Check centrism
+            score, question_id, evidence, refs = self._check_centrism(
+                centrism, combined_text, topic_name
+            )
+
+        # If no match in branch, check centrism
+        if score is None and centrism:
+            score, question_id, evidence, refs = self._check_centrism(
+                centrism, combined_text, topic_name
+            )
+
+        return TopicAnalysisResult(
+            topic_name=topic_name,
+            is_relevant=True,
+            stance=stance,
+            score=score,
+            matched_question_id=question_id,
+            evidence=evidence,
+            references=refs
+        )
+
+    def _run_preliminary_check(
+        self,
+        preliminary: Dict[str, Any],
+        combined_text: str,
+        topic_name: str
+    ) -> bool:
+        """
+        Run the preliminary check to determine if topic is discussed.
+        Returns True if topic is relevant, False otherwise.
+        """
+        if not preliminary:
+            return False
+
+        question = preliminary.get("question", "")
+        if not question:
+            return False
+
+        prompt = f"""
+Analyze the following articles and answer this question with ONLY "Yes" or "No":
+
+QUESTION: {question}
+
+ARTICLES:
+{combined_text[:4000]}
+
+Answer with ONLY "Yes" or "No". Nothing else.
+"""
+
+        try:
+            response = llm.invoke([HumanMessage(content=prompt)])
+            answer = response.content.strip().lower()
+            return answer.startswith("yes")
+        except Exception as e:
+            logger.warning(f"Preliminary check failed for {topic_name}: {e}")
+            return False
+
+    def _detect_stance(self, combined_text: str, topic_name: str) -> str:
+        """
+        Detect whether articles lean LEFT or RIGHT on this topic.
+        Returns: "left", "right", or "neutral"
+        """
+        prompt = f"""
+Analyze the following articles regarding the topic: {topic_name}
+
+Based on the perspective, framing, and arguments presented, does this content generally lean towards:
+- LEFT/PROGRESSIVE perspectives (supporting government intervention, social equality, progressive values)
+- RIGHT/CONSERVATIVE perspectives (supporting free markets, traditional values, limited government)
+- NEUTRAL/BALANCED (no clear lean either direction)
+
+ARTICLES:
+{combined_text[:4000]}
+
+Respond with ONLY one word: "left", "right", or "neutral"
+"""
+
+        try:
+            response = llm.invoke([HumanMessage(content=prompt)])
+            answer = response.content.strip().lower()
+            if "left" in answer:
+                return "left"
+            elif "right" in answer:
+                return "right"
+            else:
+                return "neutral"
+        except Exception as e:
+            logger.warning(f"Stance detection failed for {topic_name}: {e}")
+            return "neutral"
+
+    def _execute_branch(
+        self,
+        questions: List[Dict[str, Any]],
+        combined_text: str,
+        topic_name: str,
+        order: str
+    ) -> tuple:
+        """
+        Execute branch questions, checking extremes FIRST.
+
+        order:
+        - "extreme_first": Questions are already ordered extreme to moderate (left branch)
+        - "extreme_first_reverse": Questions need to be reversed to go extreme to moderate (right branch)
+
+        Returns: (score, question_id, evidence, references)
+        """
+        if not questions:
+            return None, None, "No questions in branch", []
+
+        # Order questions to check extremes first
+        if order == "extreme_first_reverse":
+            # Reverse the list so R4 (extreme +10) is checked before R1 (moderate +2.5)
+            questions = list(reversed(questions))
+        # For "extreme_first", questions are already in correct order (L1 extreme first)
+
+        # Recursively check each question
+        for question_data in questions:
+            question_id = question_data.get("id", "")
+            question = question_data.get("question", "")
+            score_if_yes = question_data.get("score_if_yes")
+            references = question_data.get("references", [])
+
+            if not question:
+                continue
+
+            # Ask the LLM if this specific position is advocated
+            answer, evidence = self._ask_question(question, combined_text, topic_name)
+
+            if answer:  # If YES -> Score and STOP
+                return score_if_yes, question_id, evidence, references
+
+            # If NO -> Continue to next question (less extreme)
+
+        # If all questions answered NO, return None to check centrism
+        return None, None, "No match in branch", []
+
+    def _ask_question(
+        self,
+        question: str,
+        combined_text: str,
+        topic_name: str
+    ) -> tuple:
+        """
+        Ask a specific ideology question about the articles.
+        Returns: (answer: bool, evidence: str)
+        """
+        prompt = f"""
+Analyze the following articles regarding {topic_name}.
+
+QUESTION: {question}
+
+ARTICLES:
+{combined_text[:4000]}
+
+Based on the content, does this media source advocate for or support the position described in the question?
+
+Respond in this exact JSON format:
+{{"answer": "yes" or "no", "evidence": "Brief quote or summary supporting your answer"}}
+"""
+
+        try:
+            response = llm.invoke([HumanMessage(content=prompt)])
+            content = response.content.strip()
+            content = content.replace('```json', '').replace('```', '').strip()
+
+            data = json.loads(content)
+            answer = data.get("answer", "no").lower() == "yes"
+            evidence = data.get("evidence", "")
+
+            return answer, evidence
+        except Exception as e:
+            logger.warning(f"Question evaluation failed: {e}")
+            return False, f"Error: {str(e)}"
+
+    def _check_centrism(
+        self,
+        centrism_data: Dict[str, Any],
+        combined_text: str,
+        topic_name: str
+    ) -> tuple:
+        """
+        Check if content represents centrist/balanced position.
+        Returns: (score, question_id, evidence, references)
+        """
+        if not centrism_data:
+            return 0, None, "Default centrist score", []
+
+        question = centrism_data.get("question", "")
+        question_id = centrism_data.get("id", "")
+        score_if_yes = centrism_data.get("score_if_yes", 0)
+        references = centrism_data.get("references", [])
+
+        if not question:
+            return 0, question_id, "No centrism question defined", references
+
+        answer, evidence = self._ask_question(question, combined_text, topic_name)
+
+        if answer:
+            return score_if_yes, question_id, evidence, references
+        else:
+            # If not centrist and no branch matched, return 0 as default
+            return 0, question_id, "No clear position detected", references
+
+    def _build_methodology_notes(
+        self,
+        economic: DimensionAnalysisResult,
+        social: DimensionAnalysisResult
+    ) -> str:
+        """Build methodology notes for the analysis."""
+        notes = []
+        notes.append("Ideology Analysis Methodology:")
+        notes.append("- Decision tree approach checking extremes FIRST")
+        notes.append("- Topic relevance filtering via preliminary checks")
+        notes.append("- Stance detection before branch execution")
+        notes.append("")
+        notes.append(f"Economic Dimension: {economic.relevant_topic_count} relevant topics analyzed")
+        if economic.average_score is not None:
+            notes.append(f"  Average Score: {economic.average_score:+.2f}")
+        notes.append(f"Social Dimension: {social.relevant_topic_count} relevant topics analyzed")
+        if social.average_score is not None:
+            notes.append(f"  Average Score: {social.average_score:+.2f}")
+
+        return "\n".join(notes)
+
+    def get_economic_score(self, articles: List[Article]) -> Dict[str, Any]:
+        """
+        Convenience method to get just economic score.
+        Can be used as drop-in replacement for EconomicAnalyzer.
+        """
+        result = self.analyze(articles)
+        score = result.combined_economic_score if result.combined_economic_score is not None else 0.0
+
+        # Map score to label
+        label = self._score_to_economic_label(score)
+
+        return {"label": label, "score": score}
+
+    def get_social_score(self, articles: List[Article]) -> Dict[str, Any]:
+        """
+        Convenience method to get just social score.
+        Can be used as drop-in replacement for SocialAnalyzer.
+        """
+        result = self.analyze(articles)
+        score = result.combined_social_score if result.combined_social_score is not None else 0.0
+
+        # Map score to label
+        label = self._score_to_social_label(score)
+
+        return {"label": label, "score": score}
+
+    def _score_to_economic_label(self, score: float) -> str:
+        """Map numeric score to economic ideology label."""
+        if score <= -8:
+            return "Communism"
+        elif score <= -6:
+            return "Socialism"
+        elif score <= -4:
+            return "Democratic Socialism"
+        elif score <= -1.5:
+            return "Regulated Market Economy"
+        elif score <= 1.5:
+            return "Centrism"
+        elif score <= 4:
+            return "Moderately Regulated Capitalism"
+        elif score <= 6:
+            return "Classical Liberalism"
+        elif score <= 8:
+            return "Libertarianism"
+        else:
+            return "Radical Laissez-Faire"
+
+    def _score_to_social_label(self, score: float) -> str:
+        """Map numeric score to social values label."""
+        if score <= -8:
+            return "Strong Progressive"
+        elif score <= -6:
+            return "Progressive"
+        elif score <= -4:
+            return "Moderate Progressive"
+        elif score <= -1.5:
+            return "Mild Progressive"
+        elif score <= 1.5:
+            return "Balanced"
+        elif score <= 4:
+            return "Mild Conservative"
+        elif score <= 6:
+            return "Moderate Conservative"
+        elif score <= 8:
+            return "Traditional Conservative"
+        else:
+            return "Strong Traditional Conservative"
