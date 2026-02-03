@@ -37,6 +37,11 @@ from config import (
 )
 from scraper import Article, SiteMetadata
 from local_detector import LocalPropagandaDetector
+from editorial_bias_detection import (
+    StructuredEditorialBiasAnalyzer as _StructuredEditorialBiasAnalyzer,
+    score_to_editorial_label,
+    EditorialBiasAnalysis
+)
 
 local_detector = None
 logger = logging.getLogger(__name__)
@@ -415,48 +420,53 @@ class EditorialBiasAnalyzer:
     Analyzes editorial/opinion bias (15% of Bias Score).
     Evaluates bias in opinion pieces, editorials, and use of loaded emotional language.
     Scale: -10 (Extreme Left) to +10 (Extreme Right)
+
+    Uses the structured editorial bias detection approach:
+    1. Clickbait detection in headlines (pattern matching)
+    2. Loaded language analysis (lexicon-based + LLM)
+    3. Emotional manipulation scoring
+    4. Political direction detection
+
+    Based on:
+    - Recasens et al. (2013) - Linguistic Models for Bias Detection
+    - Chakraborty et al. (2016) - Clickbait Detection
+    - QCRI Emotional Language Analysis
     """
 
+    def __init__(self):
+        self._structured_analyzer = _StructuredEditorialBiasAnalyzer()
+
     def analyze(self, articles: List[Article]) -> Dict[str, Any]:
-        # Prefer opinion articles if available
-        opinion_articles = [a for a in articles if a.is_opinion][:5]
-        if not opinion_articles:
-            opinion_articles = articles[:5]
+        """
+        Analyze editorial bias using structured approach.
 
-        combined = "\n".join([f"- {a.title}: {a.text[:400]}" for a in opinion_articles])
-        prompt = f"""
-        Analyze the EDITORIAL BIAS of this media outlet.
-        Focus on opinion pieces, editorials, and use of emotional/loaded language.
-
-        Consider:
-        - Do editorials consistently favor one political side?
-        - Is emotional or manipulative language used?
-        - Are loaded terms used to describe political figures or policies?
-
-        Editorial Bias Scale (choose ONE):
-        - Extreme Left Editorial (-10): Exclusively promotes left views with highly emotional language
-        - Strong Left Editorial (-7.5): Regularly supports left views with emotional language
-        - Moderate Left Editorial (-5): Often leans left with some emotional framing
-        - Mild Left Editorial (-2.5): Slightly favors left perspectives
-        - Neutral/Balanced Editorial (0): Presents perspectives fairly, avoids loaded language
-        - Mild Right Editorial (+2.5): Slightly favors right perspectives
-        - Moderate Right Editorial (+5): Often leans right with some emotional framing
-        - Strong Right Editorial (+7.5): Regularly supports right views with emotional language
-        - Extreme Right Editorial (+10): Exclusively promotes right views with highly emotional language
-
-        Content to analyze:
-        {combined}
-
-        Return ONLY the category name exactly as written above (e.g., "Neutral/Balanced Editorial").
+        Returns:
+            dict with:
+            - label: MBFC editorial bias label
+            - score: -10 to +10 score
+            - details: Additional analysis details
         """
         try:
-            res = llm.invoke([HumanMessage(content=prompt)])
-            label = res.content.strip().replace("'", "").replace('"', '')
-            score = EDITORIAL_BIAS_SCALE.get(label, 0.0)
-            return {"label": label, "score": score}
+            # Use structured analyzer (prefers opinion/editorial articles)
+            result: EditorialBiasAnalysis = self._structured_analyzer.analyze(
+                articles,
+                prefer_opinion=True
+            )
+
+            return {
+                "label": result.overall_label,
+                "score": result.overall_score,
+                "details": {
+                    "direction": result.direction,
+                    "clickbait_score": result.clickbait_score,
+                    "loaded_language_score": result.loaded_language_score,
+                    "emotional_manipulation_score": result.emotional_manipulation_score,
+                    "methodology": result.methodology_notes
+                }
+            }
         except Exception as e:
             logger.error(f"Editorial bias analysis failed: {e}")
-            return {"label": "Neutral/Balanced Editorial", "score": 0.0}
+            return {"label": "Neutral/Balanced Editorial", "score": 0.0, "details": {}}
 
 
 # =============================================================================

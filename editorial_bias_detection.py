@@ -88,6 +88,7 @@ class ArticleLanguageAnalysis:
 class EditorialBiasAnalysis:
     """Complete editorial bias analysis result."""
     overall_score: float  # -10 to +10 (negative = left bias, positive = right bias)
+    overall_label: str  # e.g., "Moderate Left Editorial Bias"
     clickbait_score: float  # 0 to 10 (higher = more clickbait)
     loaded_language_score: float  # 0 to 10 (higher = more loaded)
     emotional_manipulation_score: float  # 0 to 10
@@ -95,6 +96,64 @@ class EditorialBiasAnalysis:
     headline_analyses: List[HeadlineAnalysis]
     language_analyses: List[ArticleLanguageAnalysis]
     methodology_notes: str
+
+
+# MBFC Editorial Bias Labels (discrete 9-point scale)
+EDITORIAL_BIAS_LABELS = {
+    -10.0: "Extreme Left Editorial Bias",
+    -7.5: "Strong Left Editorial Bias",
+    -5.0: "Moderate Left Editorial Bias",
+    -2.5: "Mild Left Editorial Bias",
+    0.0: "Neutral/Balanced Editorial",
+    2.5: "Mild Right Editorial Bias",
+    5.0: "Moderate Right Editorial Bias",
+    7.5: "Strong Right Editorial Bias",
+    10.0: "Extreme Right Editorial Bias",
+}
+
+
+def score_to_editorial_label(score: float) -> str:
+    """
+    Map a continuous score (-10 to +10) to discrete MBFC editorial bias label.
+
+    Scale:
+    -10: Extreme Left Editorial Bias
+    -7.5: Strong Left Editorial Bias
+    -5: Moderate Left Editorial Bias
+    -2.5: Mild Left Editorial Bias
+    0: Neutral/Balanced
+    +2.5: Mild Right Editorial Bias
+    +5: Moderate Right Editorial Bias
+    +7.5: Strong Right Editorial Bias
+    +10: Extreme Right Editorial Bias
+    """
+    if score <= -8.75:
+        return "Extreme Left Editorial Bias"
+    elif score <= -6.25:
+        return "Strong Left Editorial Bias"
+    elif score <= -3.75:
+        return "Moderate Left Editorial Bias"
+    elif score <= -1.25:
+        return "Mild Left Editorial Bias"
+    elif score <= 1.25:
+        return "Neutral/Balanced Editorial"
+    elif score <= 3.75:
+        return "Mild Right Editorial Bias"
+    elif score <= 6.25:
+        return "Moderate Right Editorial Bias"
+    elif score <= 8.75:
+        return "Strong Right Editorial Bias"
+    else:
+        return "Extreme Right Editorial Bias"
+
+
+def snap_to_discrete_score(score: float) -> float:
+    """
+    Snap a continuous score to the nearest discrete value in the 9-point scale.
+    Values: -10, -7.5, -5, -2.5, 0, 2.5, 5, 7.5, 10
+    """
+    discrete_values = [-10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0, 7.5, 10.0]
+    return min(discrete_values, key=lambda x: abs(x - score))
 
 
 # =============================================================================
@@ -527,26 +586,55 @@ class StructuredEditorialBiasAnalyzer:
         self.clickbait_analyzer = ClickbaitAnalyzer()
         self.loaded_language_analyzer = LoadedLanguageAnalyzer()
 
-    def analyze(self, articles: List[Article]) -> EditorialBiasAnalysis:
+    def analyze(self, articles: List[Article], prefer_opinion: bool = True) -> EditorialBiasAnalysis:
         """
         Perform complete editorial bias analysis.
+
+        Args:
+            articles: List of articles to analyze
+            prefer_opinion: If True, prioritize opinion/editorial articles
 
         Returns:
             EditorialBiasAnalysis with scores and evidence
         """
         logger.info(f"Analyzing editorial bias for {len(articles)} articles")
 
+        # Filter to opinion/editorial articles if available and preferred
+        if prefer_opinion:
+            opinion_articles = [a for a in articles if a.is_opinion]
+            if opinion_articles:
+                articles_to_analyze = opinion_articles[:10]
+                logger.info(f"Using {len(articles_to_analyze)} opinion/editorial articles")
+            else:
+                articles_to_analyze = articles[:10]
+                logger.info("No opinion articles found, using all articles")
+        else:
+            articles_to_analyze = articles[:10]
+
+        if not articles_to_analyze:
+            return EditorialBiasAnalysis(
+                overall_score=0.0,
+                overall_label="Neutral/Balanced Editorial",
+                clickbait_score=0.0,
+                loaded_language_score=0.0,
+                emotional_manipulation_score=0.0,
+                direction="neutral",
+                headline_analyses=[],
+                language_analyses=[],
+                methodology_notes="No articles to analyze"
+            )
+
         # Analyze headlines for clickbait
-        headlines = [a.title for a in articles]
+        headlines = [a.title for a in articles_to_analyze]
         headline_analyses = self.clickbait_analyzer.analyze_headlines(headlines)
 
         # Analyze articles for loaded language
         language_analyses = [
             self.loaded_language_analyzer.analyze_article(a)
-            for a in articles[:10]  # Limit to 10 articles
+            for a in articles_to_analyze
         ]
 
-        # Calculate aggregate scores
+        # Calculate aggregate scores (0-1 scale internally)
         clickbait_score = self._calculate_clickbait_score(headline_analyses)
         loaded_language_score = self._calculate_loaded_language_score(language_analyses)
 
@@ -558,24 +646,35 @@ class StructuredEditorialBiasAnalyzer:
             all_instances
         )
 
-        # Calculate emotional manipulation score
+        # Calculate emotional manipulation score (0-1 scale)
         emotional_manipulation_score = self._calculate_manipulation_score(
             headline_analyses, language_analyses
         )
 
         # Calculate overall bias score (-10 to +10)
-        # Positive = right bias in editorials, Negative = left bias
+        # Use LLM to determine direction if rule-based detection is inconclusive
+        if direction == "neutral" and len(articles_to_analyze) > 0:
+            llm_direction = self._llm_detect_direction(articles_to_analyze[:5])
+            if llm_direction != "neutral":
+                direction = llm_direction
+                direction_confidence = 0.6  # Moderate confidence for LLM-only detection
+
         overall_score = self._calculate_overall_score(
-            direction,
-            direction_confidence,
-            loaded_language_score,
-            emotional_manipulation_score
+            direction=direction,
+            direction_confidence=direction_confidence,
+            loaded_language_score=loaded_language_score,
+            manipulation_score=emotional_manipulation_score,
+            clickbait_score=clickbait_score
         )
 
-        # LLM verification for edge cases
-        if len(articles) > 0 and overall_score != 0:
-            llm_adjustment = self._llm_verify_direction(articles[:5], direction)
+        # LLM verification to adjust confidence
+        if len(articles_to_analyze) > 0 and abs(overall_score) > 1.0:
+            llm_adjustment = self._llm_verify_direction(articles_to_analyze[:5], direction)
             overall_score = overall_score * llm_adjustment
+
+        # Clamp to valid range and get label
+        overall_score = max(-10.0, min(10.0, overall_score))
+        overall_label = score_to_editorial_label(overall_score)
 
         methodology_notes = self._build_methodology_notes(
             len(headline_analyses),
@@ -587,6 +686,7 @@ class StructuredEditorialBiasAnalyzer:
 
         return EditorialBiasAnalysis(
             overall_score=round(overall_score, 2),
+            overall_label=overall_label,
             clickbait_score=round(clickbait_score * 10, 2),  # Convert to 0-10
             loaded_language_score=round(loaded_language_score * 10, 2),
             emotional_manipulation_score=round(emotional_manipulation_score * 10, 2),
@@ -638,24 +738,120 @@ class StructuredEditorialBiasAnalyzer:
         direction: str,
         direction_confidence: float,
         loaded_language_score: float,
-        manipulation_score: float
+        manipulation_score: float,
+        clickbait_score: float
     ) -> float:
         """
         Calculate overall editorial bias score (-10 to +10).
 
+        Methodology:
+        - Score reflects BOTH direction (left/right) AND intensity (emotional/manipulative language)
+        - Intensity is calculated from:
+          * Loaded language score (weight: 0.4)
+          * Emotional manipulation score (weight: 0.4)
+          * Clickbait score (weight: 0.2)
+        - Direction confidence affects the final score magnitude
+
+        Scale:
+        -10: Extreme Left - Editorials exclusively promote left views with highly emotional language
+        -7.5: Strong Left - Regularly supports left views with emotional language
+        -5: Moderate Left - Often leans left with some emotional framing
+        -2.5: Mild Left - Slightly favors left perspectives, minimal emotional language
+        0: Neutral/Balanced - Presents perspectives fairly, avoids loaded emotional language
+        +2.5 to +10: Mirror of left scale for right-leaning bias
+
         Negative = left-leaning editorial bias
         Positive = right-leaning editorial bias
         """
-        # Base intensity from loaded language and manipulation
-        intensity = (loaded_language_score + manipulation_score) / 2
+        if direction == "neutral":
+            # Even neutral can have some emotional language without political direction
+            # This might indicate sensationalism without clear political bias
+            intensity = (loaded_language_score * 0.4 +
+                        manipulation_score * 0.4 +
+                        clickbait_score * 0.2)
+            # Return a small value if there's high emotional content but no clear direction
+            if intensity > 0.5:
+                return 0.0  # High emotional but no direction = stays at 0
+            return 0.0
 
-        # Scale to -10 to +10 based on direction
+        # Calculate intensity from multiple factors
+        # Weighted combination: loaded language is most important for bias
+        intensity = (loaded_language_score * 0.4 +
+                    manipulation_score * 0.4 +
+                    clickbait_score * 0.2)
+
+        # Map intensity (0-1) to score magnitude (0-10)
+        # Use a non-linear mapping to better distinguish between mild and extreme
+        # intensity < 0.2 -> Mild (0-2.5)
+        # intensity 0.2-0.4 -> Moderate (2.5-5)
+        # intensity 0.4-0.6 -> Strong (5-7.5)
+        # intensity > 0.6 -> Extreme (7.5-10)
+
+        if intensity < 0.2:
+            base_score = intensity * 12.5  # Maps 0-0.2 to 0-2.5
+        elif intensity < 0.4:
+            base_score = 2.5 + (intensity - 0.2) * 12.5  # Maps 0.2-0.4 to 2.5-5
+        elif intensity < 0.6:
+            base_score = 5.0 + (intensity - 0.4) * 12.5  # Maps 0.4-0.6 to 5-7.5
+        else:
+            base_score = 7.5 + (intensity - 0.6) * 6.25  # Maps 0.6-1.0 to 7.5-10
+
+        # Apply direction confidence
+        final_score = base_score * max(0.5, direction_confidence)
+
+        # Clamp to 0-10 range before applying direction
+        final_score = min(10.0, max(0.0, final_score))
+
+        # Apply direction sign
         if direction == "left":
-            return -intensity * 10 * direction_confidence
+            return -final_score
         elif direction == "right":
-            return intensity * 10 * direction_confidence
+            return final_score
         else:
             return 0.0
+
+    def _llm_detect_direction(self, articles: List[Article]) -> str:
+        """
+        Use LLM to detect political direction when rule-based detection is inconclusive.
+
+        Returns: "left", "right", or "neutral"
+        """
+        combined = "\n".join([
+            f"HEADLINE: {a.title}\nEXCERPT: {a.text[:400]}"
+            for a in articles[:3]
+        ])
+
+        prompt = f"""
+Analyze the political lean of these editorial/opinion article excerpts.
+
+{combined}
+
+Based on the language, framing, arguments, and perspective presented, determine if the editorial stance is:
+- LEFT (progressive/liberal viewpoints, criticism of conservative policies)
+- RIGHT (conservative/traditional viewpoints, criticism of liberal policies)
+- NEUTRAL (balanced approach, no clear political lean)
+
+Consider:
+- What positions are being advocated?
+- What is being criticized or praised?
+- What loaded terms are used?
+- Whose perspective is being presented sympathetically?
+
+Respond with ONLY one word: "left", "right", or "neutral"
+"""
+
+        try:
+            response = llm.invoke([HumanMessage(content=prompt)])
+            answer = response.content.strip().lower()
+            if "left" in answer:
+                return "left"
+            elif "right" in answer:
+                return "right"
+            else:
+                return "neutral"
+        except Exception as e:
+            logger.warning(f"LLM direction detection failed: {e}")
+            return "neutral"
 
     def _llm_verify_direction(
         self,
