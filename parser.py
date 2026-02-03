@@ -435,15 +435,15 @@ def parse_source_page(url):
             data['factual_reporting'] = factual_match.group(1).strip()
 
     # Country - be more specific with the pattern
-    country_match = re.search(r'Country:\s*([A-Za-z][A-Za-z\s,]*?)(?:\s*Press Freedom|\s*MBFC|\s*Media Type|\s*Traffic|$)', full_text)
+    country_match = re.search(r'Country:\s*([A-Za-z][A-Za-z\s,]*?)(?=(?:\s*(?:Press|MBF|Media|Traffic|World|Factual)|$))', full_text, re.IGNORECASE)
     if country_match:
         data['country'] = country_match.group(1).strip()
-
+        
     # Press Freedom Rating (MBFC uses both "Press Freedom Rating" and "MBFC's Country Freedom Rating/Rank")
-    freedom_match = re.search(r'(?:Press Freedom Rating|MBFC\'s Country Freedom (?:Rating|Rank)):\s*([A-Z][A-Z\s]*?)(?:\s*Media Type|\s*Traffic|\s*MBFC Credibility|$)', full_text)
+    freedom_match = re.search(r'(?:Press Freedom Rating|MBF[Cc][’\']s Country Freedom (?:Rating|Rank)):\s*([A-Z][A-Z\s]*?)(?:\s*Media|\s*Traffic|\s*MBFC|$)', full_text)
     if freedom_match:
         data['country_freedom_rating'] = freedom_match.group(1).strip()
-
+        
     # Media Type
     media_match = re.search(r'Media Type:\s*([A-Za-z][A-Za-z\s/,]*?)(?:\s*Traffic|\s*MBFC Credibility|$)', full_text)
     if media_match:
@@ -524,9 +524,21 @@ def parse_source_page(url):
 
     # === EXTRACT OVERALL SUMMARY ===
     # Usually starts with "Overall, we rate..."
-    overall_match = re.search(r'(Overall,?\s+we rate[^.]+(?:\.[^.]+){0,3}\.)', full_text)
+    overall_match = re.search(r'(Overall,?\s+.*?(?:\.[^.]+){0,3}\.)', full_text)
     if overall_match:
         data['overall_summary'] = overall_match.group(1).strip()
+    
+    # Strategy 2: Fallback for bullet-point summaries (looking for "is rated" inside <li>)
+    if not data['overall_summary']:
+        list_items = entry_content.find_all('li')
+        for li in list_items:
+            li_text = li.get_text(strip=True)
+            # Check for signature summary phrases
+            if ('is rated' in li_text or 'we rate' in li_text) and len(li_text) > 50:
+                 # Simple filter to avoid grabbing menu items or footers
+                if any(x in li_text for x in ['Left', 'Right', 'Center', 'Satire', 'Bias', 'Factual']):
+                    data['overall_summary'] = li_text
+                    break
 
     # === EXTRACT BIAS CATEGORY DESCRIPTION ===
     # The intro paragraph that describes the bias category
@@ -674,7 +686,7 @@ if __name__ == "__main__":
             main(mode='parse_only', test_limit=0)
         elif arg == 'test':
             # Test mode: parse only 20 sources
-            main(mode='parse_only', test_limit=20)
+            main(mode='parse_only', test_limit=40)
         elif arg == 'full':
             # Full mode: collect URLs + parse ALL
             main(mode='full', test_limit=0)
