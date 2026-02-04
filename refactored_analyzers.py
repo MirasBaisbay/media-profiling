@@ -25,6 +25,9 @@ from langchain_openai import ChatOpenAI
 from schemas import (
     ArticleClassification,
     ArticleType,
+    BiasDirection,
+    EditorialBiasLLMOutput,
+    EditorialBiasResult,
     FactCheckAnalysisResult,
     FactCheckFinding,
     FactCheckLLMOutput,
@@ -34,6 +37,13 @@ from schemas import (
     MediaTypeClassification,
     MediaTypeLLMOutput,
     MediaTypeSource,
+    PolicyDomain,
+    PolicyPosition,
+    PseudoscienceAnalysisResult,
+    PseudoscienceCategory,
+    PseudoscienceIndicator,
+    PseudoscienceLLMOutput,
+    PseudoscienceSeverity,
     SourceAssessment,
     SourceQuality,
     SourcingAnalysisResult,
@@ -1548,6 +1558,550 @@ Then calculate an overall sourcing quality score (0=excellent sourcing, 10=poor 
 
 
 # =============================================================================
+# EditorialBiasAnalyzer
+# =============================================================================
+
+
+class EditorialBiasAnalyzer:
+    """
+    Analyzes editorial/political bias using LLM content analysis.
+
+    This analyzer replaces keyword matching and lexicon-based approaches with
+    comprehensive LLM analysis of article content. It uses the MBFC methodology
+    encoded directly in the system prompt.
+
+    The analyzer evaluates:
+    1. Policy positions across major domains (economic, social, environmental, etc.)
+    2. Use of politically loaded language
+    3. Story selection bias patterns
+    4. Overall editorial slant
+
+    Bias Scale:
+    - -10 to -7: Extreme Left / Left
+    - -7 to -3: Left-Center
+    - -3 to +3: Center
+    - +3 to +7: Right-Center
+    - +7 to +10: Right / Extreme Right
+
+    Attributes:
+        llm: LangChain LLM with structured output for bias analysis
+    """
+
+    # Comprehensive system prompt encoding MBFC methodology
+    SYSTEM_PROMPT = """You are an expert media analyst specializing in detecting editorial and political bias.
+Your task is to analyze article content and determine the outlet's political leaning.
+
+IMPORTANT: This analysis uses an AMERICAN political perspective. Left/Right designations
+are based on the US political spectrum.
+
+## BIAS SCALE
+Use a scale from -10 (far left) to +10 (far right), with 0 being perfectly centrist:
+- Extreme Left (-10 to -8): Advocates radical progressive positions on most issues
+- Left (-8 to -5): Consistently favors progressive/liberal policies
+- Left-Center (-5 to -2): Leans progressive but with some moderate positions
+- Center (-2 to +2): Balanced coverage, minimal editorial slant, presents multiple viewpoints
+- Right-Center (+2 to +5): Leans conservative but with some moderate positions
+- Right (+5 to +8): Consistently favors conservative policies
+- Extreme Right (+8 to +10): Advocates radical conservative/nationalist positions
+
+## POLICY DOMAIN INDICATORS
+
+### ECONOMIC POLICY
+LEFT indicators:
+- Supports income equality, higher taxes on wealthy
+- Favors government spending on social programs
+- Supports stronger business regulations
+- Advocates minimum wage increases, wealth redistribution
+- Pro-union, worker protections
+
+RIGHT indicators:
+- Supports lower taxes, less regulation
+- Favors reduced government spending
+- Prefers free-market solutions
+- Opposes minimum wage mandates
+- Pro-business, lower corporate taxes
+
+### SOCIAL ISSUES
+LEFT indicators:
+- Supports abortion rights
+- Favors LGBTQ+ rights and protections
+- Advocates for diversity, equity, inclusion initiatives
+- Supports criminal justice reform
+- Favors gun control measures
+
+RIGHT indicators:
+- Opposes or seeks to restrict abortion
+- Traditional marriage advocacy
+- Opposes DEI initiatives
+- Tough on crime positions
+- Strong Second Amendment support
+
+### ENVIRONMENTAL POLICY
+LEFT indicators:
+- Climate change is urgent, human-caused crisis
+- Supports strong environmental regulations
+- Favors renewable energy transition
+- Supports international climate agreements
+
+RIGHT indicators:
+- Skepticism about climate urgency
+- Prioritizes economic impact of regulations
+- Supports fossil fuel industry
+- Skeptical of international climate agreements
+
+### HEALTHCARE
+LEFT indicators:
+- Supports universal healthcare
+- Favors government involvement in healthcare
+- Views healthcare as a right
+
+RIGHT indicators:
+- Prefers private healthcare solutions
+- Opposes government-run healthcare
+- Views healthcare as market service
+
+### IMMIGRATION
+LEFT indicators:
+- Supports pathways to citizenship
+- Opposes harsh enforcement measures
+- Favors less restrictive immigration
+
+RIGHT indicators:
+- Emphasizes border security
+- Opposes amnesty programs
+- Favors more restrictive immigration
+
+### GUN RIGHTS
+LEFT indicators:
+- Supports background checks, waiting periods
+- Favors assault weapon restrictions
+- Emphasizes gun violence prevention
+
+RIGHT indicators:
+- Strong Second Amendment advocacy
+- Opposes gun restrictions
+- Emphasizes self-defense rights
+
+## LOADED LANGUAGE DETECTION
+Identify politically loaded terms that reveal bias:
+
+LEFT-LEANING loaded terms: "regime", "far-right", "extremist", "racist", "xenophobic",
+"fascist", "climate denier", "voter suppression", "white supremacy", "wealth inequality"
+
+RIGHT-LEANING loaded terms: "radical left", "socialist", "woke", "cancel culture",
+"mainstream media", "fake news", "open borders", "defund police", "critical race theory"
+
+## STORY SELECTION BIAS
+Note if the outlet appears to:
+- Selectively cover stories that favor one political side
+- Ignore stories that would be unfavorable to their preferred side
+- Frame neutral events with partisan spin
+
+## ANALYSIS INSTRUCTIONS
+1. Analyze the actual CONTENT, not the outlet's reputation
+2. Look for patterns across multiple articles if provided
+3. Identify specific policy positions expressed
+4. Note use of loaded/emotional language
+5. Consider both explicit statements and implicit framing
+6. Be conservative - don't over-interpret ambiguous content
+7. Distinguish between NEWS reporting and OPINION pieces"""
+
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        temperature: float = 0.0,
+    ):
+        """
+        Initialize the EditorialBiasAnalyzer.
+
+        Args:
+            model: OpenAI model to use
+            temperature: LLM temperature (0 for deterministic)
+        """
+        self.llm = get_llm(model, temperature).with_structured_output(EditorialBiasLLMOutput)
+
+    def _extract_domain(self, url: str) -> str:
+        """Extract the root domain from a URL."""
+        parsed = urlparse(url if url.startswith("http") else f"https://{url}")
+        domain = parsed.netloc or parsed.path
+        domain = re.sub(r"^www\.", "", domain)
+        domain = domain.split("/")[0]
+        return domain.lower()
+
+    def _score_to_label(self, score: float) -> str:
+        """Convert numeric score to MBFC-style label."""
+        if score <= -7:
+            return "Left"
+        elif score <= -3:
+            return "Left-Center"
+        elif score <= 3:
+            return "Center"
+        elif score <= 7:
+            return "Right-Center"
+        else:
+            return "Right"
+
+    def _analyze_with_llm(self, articles: list[dict[str, str]]) -> EditorialBiasLLMOutput:
+        """
+        Use LLM to analyze editorial bias in articles.
+
+        Args:
+            articles: List of article dicts with 'title' and 'text' keys
+
+        Returns:
+            EditorialBiasLLMOutput with bias assessment
+        """
+        # Format articles for analysis
+        articles_text = []
+        for i, article in enumerate(articles, 1):
+            title = article.get("title", "Untitled")
+            text = article.get("text", "")[:2000]  # Limit text length
+            articles_text.append(f"ARTICLE {i}:\nTitle: {title}\nText: {text}\n")
+
+        combined_text = "\n---\n".join(articles_text)
+
+        user_prompt = f"""Analyze the following articles for editorial/political bias:
+
+{combined_text}
+
+Assess:
+1. Overall political leaning (score from -10 to +10)
+2. Positions on specific policy domains if detectable
+3. Use of loaded language (with examples)
+4. Any story selection bias patterns"""
+
+        try:
+            result: EditorialBiasLLMOutput = self.llm.invoke(
+                [
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"EditorialBiasAnalyzer LLM call failed: {e}")
+            return EditorialBiasLLMOutput(
+                overall_bias=BiasDirection.CENTER,
+                bias_score=0.0,
+                policy_positions=[],
+                uses_loaded_language=False,
+                loaded_language_examples=[],
+                story_selection_bias=None,
+                confidence=0.0,
+                reasoning=f"LLM analysis failed: {str(e)}",
+            )
+
+    def analyze(
+        self,
+        articles: list[dict[str, str]],
+        url_or_domain: str | None = None,
+        outlet_name: str | None = None,
+    ) -> EditorialBiasResult:
+        """
+        Analyze editorial bias in articles from a media outlet.
+
+        Args:
+            articles: List of article dicts with 'title' and 'text' keys
+            url_or_domain: Optional URL or domain for context
+            outlet_name: Optional human-readable outlet name
+
+        Returns:
+            EditorialBiasResult with comprehensive bias analysis
+        """
+        domain = self._extract_domain(url_or_domain) if url_or_domain else "unknown"
+
+        if not articles:
+            return EditorialBiasResult(
+                domain=domain,
+                outlet_name=outlet_name,
+                overall_bias=BiasDirection.CENTER,
+                bias_score=0.0,
+                mbfc_label="Center",
+                policy_positions=[],
+                uses_loaded_language=False,
+                loaded_language_examples=[],
+                story_selection_bias=None,
+                articles_analyzed=0,
+                confidence=0.0,
+                reasoning="No articles provided for analysis",
+            )
+
+        # Analyze with LLM
+        llm_output = self._analyze_with_llm(articles)
+
+        # Convert score to MBFC label
+        mbfc_label = self._score_to_label(llm_output.bias_score)
+
+        return EditorialBiasResult(
+            domain=domain,
+            outlet_name=outlet_name,
+            overall_bias=llm_output.overall_bias,
+            bias_score=llm_output.bias_score,
+            mbfc_label=mbfc_label,
+            policy_positions=llm_output.policy_positions,
+            uses_loaded_language=llm_output.uses_loaded_language,
+            loaded_language_examples=llm_output.loaded_language_examples,
+            story_selection_bias=llm_output.story_selection_bias,
+            articles_analyzed=len(articles),
+            confidence=llm_output.confidence,
+            reasoning=llm_output.reasoning,
+        )
+
+
+# =============================================================================
+# PseudoscienceAnalyzer
+# =============================================================================
+
+
+class PseudoscienceAnalyzer:
+    """
+    Detects pseudoscience and conspiracy content using LLM analysis.
+
+    This analyzer replaces dictionary/keyword matching with comprehensive
+    LLM-based content analysis. It identifies pseudoscientific claims and
+    assesses how the outlet treats scientific consensus.
+
+    Categories detected:
+    - Health pseudoscience (anti-vax, alternative medicine, etc.)
+    - Climate/environmental misinformation
+    - Paranormal/supernatural claims
+    - Conspiracy theories
+    - Other pseudoscience
+
+    Severity levels:
+    - PROMOTES: Actively promotes pseudoscience as fact
+    - PRESENTS_UNCRITICALLY: Reports without proper scientific context
+    - MIXED: Sometimes promotes, sometimes critical
+    - NONE_DETECTED: No pseudoscience found
+
+    Attributes:
+        llm: LangChain LLM with structured output for pseudoscience detection
+    """
+
+    SYSTEM_PROMPT = """You are an expert science communicator and fact-checker specializing in
+identifying pseudoscience, conspiracy theories, and science misinformation.
+
+## DEFINITION
+Pseudoscience: Claims, beliefs, or practices that are presented as scientific but are
+incompatible with the scientific method - they are unproven, not testable, or contradict
+the scientific consensus.
+
+## CATEGORIES TO DETECT
+
+### HEALTH-RELATED PSEUDOSCIENCE
+- Anti-Vaccination: Claims vaccines cause autism, are dangerous, contain microchips, etc.
+  SCIENTIFIC CONSENSUS: Vaccines are safe, effective, and do not cause autism.
+
+- Alternative Medicine promoted as cure: Homeopathy, naturopathy, crystal healing presented
+  as effective medical treatments.
+  SCIENTIFIC CONSENSUS: No evidence these treatments work beyond placebo.
+
+- Alternative Cancer Treatments: Claims that essential oils, supplements, or alternative
+  therapies can cure cancer instead of conventional treatment.
+  SCIENTIFIC CONSENSUS: Only proven treatments (surgery, chemo, radiation, immunotherapy) are effective.
+
+- COVID-19 Misinformation: False claims about vaccines, treatments (ivermectin, hydroxychloroquine),
+  origins, or prevention methods.
+  SCIENTIFIC CONSENSUS: COVID vaccines are safe and effective; unproven treatments are not substitutes.
+
+- Detoxification Claims: Claims that special diets, supplements, or procedures remove "toxins."
+  SCIENTIFIC CONSENSUS: The liver and kidneys naturally detoxify; "detox" products have no proven benefit.
+
+### CLIMATE/ENVIRONMENTAL
+- Climate Change Denialism: Denying human-caused climate change, claiming it's a hoax,
+  or minimizing its urgency.
+  SCIENTIFIC CONSENSUS: Climate change is real, human-caused, and requires urgent action.
+
+- 5G Health Conspiracy: Claims that 5G causes COVID, cancer, or other health problems.
+  SCIENTIFIC CONSENSUS: 5G radio waves are non-ionizing and not harmful at normal exposure levels.
+
+- Chemtrails: Claims that aircraft condensation trails are chemical/biological agents.
+  SCIENTIFIC CONSENSUS: Contrails are simply water vapor; no evidence of deliberate spraying.
+
+- GMO Dangers: Claims that GMOs are inherently dangerous or cause health problems.
+  SCIENTIFIC CONSENSUS: GMOs are extensively tested and safe for consumption.
+
+### PARANORMAL/SUPERNATURAL
+- Astrology: Claims that celestial bodies influence personality or predict events.
+  SCIENTIFIC CONSENSUS: No mechanism or evidence for astrological effects.
+
+- Psychic Claims: Claims of telepathy, clairvoyance, or communication with the dead.
+  SCIENTIFIC CONSENSUS: No evidence for psychic phenomena despite extensive testing.
+
+- Faith Healing: Claims that prayer or spiritual intervention can cure disease.
+  SCIENTIFIC CONSENSUS: No evidence faith healing works; can be dangerous if it replaces medicine.
+
+### CONSPIRACY THEORIES
+- Flat Earth: Claims the Earth is flat and space agencies are lying.
+  SCIENTIFIC CONSENSUS: The Earth is an oblate spheroid; this is confirmed by countless observations.
+
+- Moon Landing Hoax: Claims the Apollo missions were faked.
+  SCIENTIFIC CONSENSUS: Moon landings are among the most well-documented events in history.
+
+- QAnon: Claims about secret cabals, child trafficking rings run by elites, etc.
+  SCIENTIFIC CONSENSUS: These are unfounded conspiracy theories with no evidence.
+
+## SEVERITY ASSESSMENT
+
+PROMOTES: The outlet actively promotes pseudoscience as fact or truth
+- Presents claims without skepticism
+- Attacks scientific consensus
+- Promotes practitioners/products
+- Uses persuasive language to convince readers
+
+PRESENTS_UNCRITICALLY: Reports on pseudoscience without proper context
+- Gives "both sides" treatment to science vs. pseudoscience
+- Fails to note scientific consensus
+- Presents fringe views as legitimate alternatives
+
+MIXED: Sometimes promotes, sometimes critical
+- Inconsistent treatment of pseudoscience
+- Some articles critical, others not
+
+NONE_DETECTED: No pseudoscience content found
+- Content respects scientific consensus
+- Properly contextualizes scientific uncertainty
+- Does not promote unproven claims
+
+## ANALYSIS INSTRUCTIONS
+1. Identify specific pseudoscientific claims in the content
+2. Note how the outlet frames these claims (promoting vs. debunking)
+3. Check if scientific consensus is mentioned or ignored
+4. Assess overall pattern across multiple articles if available
+5. Be precise - distinguish between reporting ON pseudoscience (journalism) vs. PROMOTING it
+6. Quote specific evidence when identifying pseudoscience content"""
+
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        temperature: float = 0.0,
+    ):
+        """
+        Initialize the PseudoscienceAnalyzer.
+
+        Args:
+            model: OpenAI model to use
+            temperature: LLM temperature (0 for deterministic)
+        """
+        self.llm = get_llm(model, temperature).with_structured_output(PseudoscienceLLMOutput)
+
+    def _extract_domain(self, url: str) -> str:
+        """Extract the root domain from a URL."""
+        parsed = urlparse(url if url.startswith("http") else f"https://{url}")
+        domain = parsed.netloc or parsed.path
+        domain = re.sub(r"^www\.", "", domain)
+        domain = domain.split("/")[0]
+        return domain.lower()
+
+    def _analyze_with_llm(self, articles: list[dict[str, str]]) -> PseudoscienceLLMOutput:
+        """
+        Use LLM to detect pseudoscience in articles.
+
+        Args:
+            articles: List of article dicts with 'title' and 'text' keys
+
+        Returns:
+            PseudoscienceLLMOutput with pseudoscience assessment
+        """
+        # Format articles for analysis
+        articles_text = []
+        for i, article in enumerate(articles, 1):
+            title = article.get("title", "Untitled")
+            text = article.get("text", "")[:2000]  # Limit text length
+            articles_text.append(f"ARTICLE {i}:\nTitle: {title}\nText: {text}\n")
+
+        combined_text = "\n---\n".join(articles_text)
+
+        user_prompt = f"""Analyze the following articles for pseudoscience and conspiracy content:
+
+{combined_text}
+
+Identify:
+1. Any pseudoscientific claims or conspiracy theories
+2. How the outlet treats these claims (promoting vs. debunking)
+3. Whether scientific consensus is respected
+4. Overall quality of science reporting (0=excellent, 10=promotes pseudoscience)"""
+
+        try:
+            result: PseudoscienceLLMOutput = self.llm.invoke(
+                [
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"PseudoscienceAnalyzer LLM call failed: {e}")
+            return PseudoscienceLLMOutput(
+                indicators=[],
+                promotes_pseudoscience=False,
+                overall_severity=PseudoscienceSeverity.NONE_DETECTED,
+                science_reporting_quality=5.0,
+                respects_scientific_consensus=True,
+                confidence=0.0,
+                reasoning=f"LLM analysis failed: {str(e)}",
+            )
+
+    def analyze(
+        self,
+        articles: list[dict[str, str]],
+        url_or_domain: str | None = None,
+        outlet_name: str | None = None,
+    ) -> PseudoscienceAnalysisResult:
+        """
+        Analyze articles for pseudoscience and conspiracy content.
+
+        Args:
+            articles: List of article dicts with 'title' and 'text' keys
+            url_or_domain: Optional URL or domain for context
+            outlet_name: Optional human-readable outlet name
+
+        Returns:
+            PseudoscienceAnalysisResult with comprehensive analysis
+        """
+        domain = self._extract_domain(url_or_domain) if url_or_domain else "unknown"
+
+        if not articles:
+            return PseudoscienceAnalysisResult(
+                domain=domain,
+                outlet_name=outlet_name,
+                score=5.0,  # Neutral when no data
+                promotes_pseudoscience=False,
+                overall_severity=PseudoscienceSeverity.NONE_DETECTED,
+                categories_found=[],
+                indicators=[],
+                respects_scientific_consensus=True,
+                articles_analyzed=0,
+                confidence=0.0,
+                reasoning="No articles provided for analysis",
+            )
+
+        # Analyze with LLM
+        llm_output = self._analyze_with_llm(articles)
+
+        # Extract unique categories found
+        categories_found = list(set(
+            indicator.category for indicator in llm_output.indicators
+        ))
+
+        return PseudoscienceAnalysisResult(
+            domain=domain,
+            outlet_name=outlet_name,
+            score=llm_output.science_reporting_quality,
+            promotes_pseudoscience=llm_output.promotes_pseudoscience,
+            overall_severity=llm_output.overall_severity,
+            categories_found=categories_found,
+            indicators=llm_output.indicators,
+            respects_scientific_consensus=llm_output.respects_scientific_consensus,
+            articles_analyzed=len(articles),
+            confidence=llm_output.confidence,
+            reasoning=llm_output.reasoning,
+        )
+
+
+# =============================================================================
 # Convenience Functions
 # =============================================================================
 
@@ -1622,6 +2176,46 @@ def analyze_sourcing(articles: list[dict[str, str]]) -> SourcingAnalysisResult:
     """
     analyzer = SourcingAnalyzer()
     return analyzer.analyze(articles)
+
+
+def analyze_editorial_bias(
+    articles: list[dict[str, str]],
+    url_or_domain: str | None = None,
+    outlet_name: str | None = None,
+) -> EditorialBiasResult:
+    """
+    Convenience function to analyze editorial/political bias.
+
+    Args:
+        articles: List of article dicts with 'title' and 'text' keys
+        url_or_domain: Optional URL or domain for context
+        outlet_name: Optional human-readable outlet name
+
+    Returns:
+        EditorialBiasResult with bias assessment
+    """
+    analyzer = EditorialBiasAnalyzer()
+    return analyzer.analyze(articles, url_or_domain, outlet_name)
+
+
+def analyze_pseudoscience(
+    articles: list[dict[str, str]],
+    url_or_domain: str | None = None,
+    outlet_name: str | None = None,
+) -> PseudoscienceAnalysisResult:
+    """
+    Convenience function to detect pseudoscience content.
+
+    Args:
+        articles: List of article dicts with 'title' and 'text' keys
+        url_or_domain: Optional URL or domain for context
+        outlet_name: Optional human-readable outlet name
+
+    Returns:
+        PseudoscienceAnalysisResult with pseudoscience assessment
+    """
+    analyzer = PseudoscienceAnalyzer()
+    return analyzer.analyze(articles, url_or_domain, outlet_name)
 
 
 # =============================================================================
