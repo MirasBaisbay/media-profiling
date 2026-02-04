@@ -25,10 +25,19 @@ from langchain_openai import ChatOpenAI
 from schemas import (
     ArticleClassification,
     ArticleType,
+    FactCheckAnalysisResult,
+    FactCheckFinding,
+    FactCheckLLMOutput,
+    FactCheckSource,
+    FactCheckVerdict,
     MediaType,
     MediaTypeClassification,
     MediaTypeLLMOutput,
     MediaTypeSource,
+    SourceAssessment,
+    SourceQuality,
+    SourcingAnalysisResult,
+    SourcingLLMOutput,
     TrafficData,
     TrafficEstimate,
     TrafficSource,
@@ -1013,6 +1022,532 @@ Based on these search results, what type of media outlet is this?"""
 
 
 # =============================================================================
+# FactCheckSearcher Configuration
+# =============================================================================
+
+# Sites to search for fact checks
+FACTCHECK_SITES = [
+    "mediabiasfactcheck.com",
+    "politifact.com",
+    "snopes.com",
+    "factcheck.org",
+    "fullfact.org",
+]
+
+# Mapping of verdicts to their "failed" status
+FAILED_VERDICTS = {
+    FactCheckVerdict.FALSE,
+    FactCheckVerdict.MOSTLY_FALSE,
+    FactCheckVerdict.PANTS_ON_FIRE,
+    FactCheckVerdict.MISLEADING,
+}
+
+
+# =============================================================================
+# FactCheckSearcher
+# =============================================================================
+
+
+class FactCheckSearcher:
+    """
+    Searches fact-checker sites for fact checks about a media outlet.
+
+    This analyzer replaces keyword heuristics with direct search on reputable
+    fact-checking sites. It searches 5 major fact-checkers and uses an LLM
+    to parse the results into structured findings.
+
+    Strategy:
+    1. Search each fact-checker site: `site:{site} "{domain}" OR "{outlet_name}"`
+    2. Combine all search snippets
+    3. Pass to LLM to extract fact check findings (verdicts, claims)
+    4. Calculate score based on failed checks count
+
+    Score Calculation:
+    - 0 failed checks = 0.0 (excellent)
+    - 1-2 failed checks = 2.0-4.0
+    - 3-5 failed checks = 5.0-7.0
+    - 6+ failed checks = 8.0-10.0 (very poor)
+
+    Attributes:
+        llm: LangChain LLM with structured output for parsing
+        search: DuckDuckGo search instance
+    """
+
+    SYSTEM_PROMPT = """You are an expert at parsing fact-check search results.
+
+Your task is to extract fact check findings from search snippets. For each fact check found:
+
+1. Identify the fact-checking organization (PolitiFact, Snopes, etc.)
+2. Summarize the claim that was checked
+3. Determine the verdict given
+
+Verdict Categories (map to these):
+- TRUE: Claim is accurate
+- MOSTLY_TRUE: Claim is mostly accurate with minor issues
+- HALF_TRUE: Claim is partly accurate, partly misleading
+- MIXED: Contains both accurate and inaccurate elements
+- MOSTLY_FALSE: Claim has some truth but is largely inaccurate
+- FALSE: Claim is not accurate
+- PANTS_ON_FIRE: Claim is extremely false/ridiculous (PolitiFact term)
+- MISLEADING: Technically accurate but missing context
+- UNPROVEN: Insufficient evidence to verify
+- NOT_RATED: Mentioned but no clear verdict given
+
+Count as "failed" fact checks: FALSE, MOSTLY_FALSE, PANTS_ON_FIRE, MISLEADING
+
+Be conservative - only extract fact checks that are clearly about the media outlet or its reporting.
+If a snippet is ambiguous or doesn't clearly contain a fact check verdict, skip it.
+If the search results are about fact-checking an outlet's OVERALL reliability rating, that's relevant.
+If results are about fact checks OF specific claims MADE BY the outlet, those are also relevant."""
+
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        temperature: float = 0.0,
+        sites: list[str] | None = None,
+    ):
+        """
+        Initialize the FactCheckSearcher.
+
+        Args:
+            model: OpenAI model to use
+            temperature: LLM temperature (0 for deterministic)
+            sites: List of fact-checker sites to search (default: FACTCHECK_SITES)
+        """
+        self.llm = get_llm(model, temperature).with_structured_output(FactCheckLLMOutput)
+        self.search = DDGS()
+        self.sites = sites or FACTCHECK_SITES.copy()
+
+    def _extract_domain(self, url: str) -> str:
+        """Extract the root domain from a URL."""
+        parsed = urlparse(url if url.startswith("http") else f"https://{url}")
+        domain = parsed.netloc or parsed.path
+        domain = re.sub(r"^www\.", "", domain)
+        domain = domain.split("/")[0]
+        return domain.lower()
+
+    def _extract_outlet_name(self, domain: str) -> str:
+        """
+        Extract a human-readable outlet name from domain.
+
+        Args:
+            domain: The domain (e.g., "nytimes.com")
+
+        Returns:
+            Outlet name (e.g., "New York Times")
+        """
+        # Common mappings
+        known_names = {
+            "nytimes.com": "New York Times",
+            "washingtonpost.com": "Washington Post",
+            "wsj.com": "Wall Street Journal",
+            "bbc.com": "BBC",
+            "cnn.com": "CNN",
+            "foxnews.com": "Fox News",
+            "msnbc.com": "MSNBC",
+            "infowars.com": "InfoWars",
+            "breitbart.com": "Breitbart",
+            "dailywire.com": "Daily Wire",
+            "theguardian.com": "The Guardian",
+            "reuters.com": "Reuters",
+            "apnews.com": "Associated Press",
+        }
+
+        if domain in known_names:
+            return known_names[domain]
+
+        # Generate from domain
+        name = domain.split(".")[0]
+        return name.replace("-", " ").replace("_", " ").title()
+
+    def _search_fact_checks(self, domain: str, outlet_name: str) -> str:
+        """
+        Search all fact-checker sites for fact checks about the outlet.
+
+        Args:
+            domain: The domain to search for
+            outlet_name: Human-readable outlet name
+
+        Returns:
+            Combined search snippets from all sites
+        """
+        all_snippets = []
+
+        for site in self.sites:
+            # Query format: site:politifact.com "nytimes.com" OR "New York Times"
+            query = f'site:{site} "{domain}" OR "{outlet_name}"'
+
+            try:
+                results = list(self.search.text(query, max_results=3))
+
+                for r in results:
+                    title = r.get("title", "")
+                    body = r.get("body", "")
+                    url = r.get("href", "")
+                    snippet = f"[{site}] {title}: {body}"
+                    if url:
+                        snippet += f" (URL: {url})"
+                    all_snippets.append(snippet)
+
+            except Exception as e:
+                logger.warning(f"Fact check search failed for {site}: {e}")
+                continue
+
+        return "\n\n".join(all_snippets) if all_snippets else ""
+
+    def _parse_with_llm(self, domain: str, outlet_name: str, snippets: str) -> FactCheckLLMOutput:
+        """
+        Use LLM to parse fact check findings from search snippets.
+
+        Args:
+            domain: The domain being analyzed
+            outlet_name: Human-readable outlet name
+            snippets: Combined search snippets
+
+        Returns:
+            FactCheckLLMOutput with findings and counts
+        """
+        user_prompt = f"""Analyze fact check search results for: {outlet_name} ({domain})
+
+SEARCH RESULTS:
+{snippets}
+
+Extract all fact check findings related to this outlet. Count how many have negative verdicts
+(FALSE, MOSTLY_FALSE, PANTS_ON_FIRE, MISLEADING)."""
+
+        try:
+            result: FactCheckLLMOutput = self.llm.invoke(
+                [
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"FactCheckSearcher LLM call failed: {e}")
+            return FactCheckLLMOutput(
+                findings=[],
+                failed_count=0,
+                total_count=0,
+                confidence=0.0,
+                reasoning=f"LLM parsing failed: {str(e)}",
+            )
+
+    def _calculate_score(self, failed_count: int, total_count: int) -> float:
+        """
+        Calculate MBFC-style score (0=excellent, 10=poor) based on failed checks.
+
+        Args:
+            failed_count: Number of failed fact checks
+            total_count: Total number of fact checks
+
+        Returns:
+            Score from 0.0 to 10.0
+        """
+        if total_count == 0:
+            # No fact checks found - neutral score
+            return 5.0
+
+        if failed_count == 0:
+            # No failed checks - excellent
+            return 0.0
+        elif failed_count <= 2:
+            # Few failed checks
+            return 2.0 + (failed_count * 1.0)
+        elif failed_count <= 5:
+            # Moderate failed checks
+            return 4.0 + (failed_count - 2) * 1.0
+        else:
+            # Many failed checks
+            return min(10.0, 7.0 + (failed_count - 5) * 0.5)
+
+    def analyze(self, url_or_domain: str, outlet_name: str | None = None) -> FactCheckAnalysisResult:
+        """
+        Search for and analyze fact checks about a media outlet.
+
+        Args:
+            url_or_domain: URL or domain to analyze
+            outlet_name: Optional human-readable outlet name (auto-generated if not provided)
+
+        Returns:
+            FactCheckAnalysisResult with findings and score
+        """
+        domain = self._extract_domain(url_or_domain)
+        outlet_name = outlet_name or self._extract_outlet_name(domain)
+
+        # Search all fact-checker sites
+        snippets = self._search_fact_checks(domain, outlet_name)
+
+        if not snippets:
+            # No results found
+            return FactCheckAnalysisResult(
+                domain=domain,
+                outlet_name=outlet_name,
+                failed_checks_count=0,
+                total_checks_count=0,
+                score=5.0,  # Neutral when no data
+                source=FactCheckSource.FALLBACK,
+                findings=[],
+                search_snippets=None,
+                confidence=0.0,
+                reasoning="No fact check results found for this outlet",
+            )
+
+        # Parse with LLM
+        llm_output = self._parse_with_llm(domain, outlet_name, snippets)
+
+        # Calculate score
+        score = self._calculate_score(llm_output.failed_count, llm_output.total_count)
+
+        return FactCheckAnalysisResult(
+            domain=domain,
+            outlet_name=outlet_name,
+            failed_checks_count=llm_output.failed_count,
+            total_checks_count=llm_output.total_count,
+            score=score,
+            source=FactCheckSource.SEARCH,
+            findings=llm_output.findings,
+            search_snippets=snippets[:1000] if snippets else None,
+            confidence=llm_output.confidence,
+            reasoning=llm_output.reasoning,
+        )
+
+
+# =============================================================================
+# SourcingAnalyzer
+# =============================================================================
+
+
+class SourcingAnalyzer:
+    """
+    Analyzes sourcing quality in articles by examining cited links.
+
+    This analyzer replaces domain whitelist approaches with LLM assessment
+    of extracted source links. It evaluates the quality and diversity of
+    sources cited in articles.
+
+    Strategy:
+    1. Extract all hyperlinks from article text
+    2. If no links found, return default mediocre score (5.0)
+    3. Extract unique domains from links
+    4. Pass domains to LLM for quality assessment
+    5. Calculate score based on quality mix
+
+    Quality Tiers:
+    - PRIMARY: Official documents, studies, original sources (best)
+    - WIRE_SERVICE: Reuters, AP, AFP (excellent)
+    - MAJOR_OUTLET: NYT, BBC, WSJ (good)
+    - CREDIBLE: Other established outlets (acceptable)
+    - UNKNOWN: Cannot assess (neutral)
+    - QUESTIONABLE: Known unreliable sources (poor)
+
+    Attributes:
+        llm: LangChain LLM with structured output for assessment
+    """
+
+    SYSTEM_PROMPT = """You are an expert at evaluating news source quality.
+
+Your task is to assess the quality of sources cited in news articles based on their domains.
+
+Quality Tiers (from best to worst):
+
+PRIMARY: Original/primary sources
+- Government websites (.gov)
+- Academic institutions (.edu)
+- Official company websites for company news
+- Published research papers
+- Court documents
+- Original data sources
+
+WIRE_SERVICE: Major wire services (highly credible)
+- reuters.com
+- apnews.com (Associated Press)
+- afp.com (Agence France-Presse)
+- upi.com
+
+MAJOR_OUTLET: Established major news outlets (good)
+- nytimes.com, washingtonpost.com, wsj.com
+- bbc.com, theguardian.com
+- cnn.com, nbcnews.com, abcnews.go.com
+- Other nationally/internationally recognized outlets
+
+CREDIBLE: Other established outlets with editorial standards
+- Regional newspapers
+- Established specialty publications
+- Well-known trade publications
+
+UNKNOWN: Cannot assess quality
+- Unfamiliar domains
+- Personal websites without clear affiliation
+- Domains you don't recognize
+
+QUESTIONABLE: Known problematic sources
+- Sites known for misinformation
+- Highly partisan sites with documented accuracy issues
+- Satire sites (when not clearly labeled)
+- Anonymous blogs without accountability
+
+Assess each domain independently. For ambiguous cases, use UNKNOWN."""
+
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        temperature: float = 0.0,
+    ):
+        """
+        Initialize the SourcingAnalyzer.
+
+        Args:
+            model: OpenAI model to use
+            temperature: LLM temperature (0 for deterministic)
+        """
+        self.llm = get_llm(model, temperature).with_structured_output(SourcingLLMOutput)
+
+    def _extract_links(self, text: str) -> list[str]:
+        """
+        Extract all URLs from article text.
+
+        Args:
+            text: Article text potentially containing URLs
+
+        Returns:
+            List of URLs found
+        """
+        # Match http/https URLs
+        url_pattern = r'https?://[^\s<>"\')\]]+[^\s<>"\')\].,;:!?]'
+        urls = re.findall(url_pattern, text)
+        return urls
+
+    def _extract_domains(self, urls: list[str]) -> list[str]:
+        """
+        Extract unique domains from URLs, filtering out common non-source domains.
+
+        Args:
+            urls: List of URLs
+
+        Returns:
+            List of unique source domains
+        """
+        # Domains to exclude (social media, etc.)
+        excluded_domains = {
+            "twitter.com", "x.com", "facebook.com", "instagram.com",
+            "youtube.com", "tiktok.com", "linkedin.com", "reddit.com",
+            "t.co",  # Twitter short links
+        }
+
+        domains = set()
+        for url in urls:
+            try:
+                parsed = urlparse(url)
+                domain = parsed.netloc.lower()
+                domain = re.sub(r"^www\.", "", domain)
+
+                if domain and domain not in excluded_domains:
+                    domains.add(domain)
+            except Exception:
+                continue
+
+        return list(domains)
+
+    def _assess_with_llm(self, domains: list[str]) -> SourcingLLMOutput:
+        """
+        Use LLM to assess source quality for each domain.
+
+        Args:
+            domains: List of unique source domains
+
+        Returns:
+            SourcingLLMOutput with assessments
+        """
+        domains_str = "\n".join(f"- {d}" for d in domains)
+
+        user_prompt = f"""Assess the quality tier for each of these source domains:
+
+{domains_str}
+
+For each domain, provide:
+1. Quality tier (PRIMARY, WIRE_SERVICE, MAJOR_OUTLET, CREDIBLE, UNKNOWN, or QUESTIONABLE)
+2. Brief reasoning
+
+Then calculate an overall sourcing quality score (0=excellent sourcing, 10=poor sourcing)."""
+
+        try:
+            result: SourcingLLMOutput = self.llm.invoke(
+                [
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"SourcingAnalyzer LLM call failed: {e}")
+            return SourcingLLMOutput(
+                sources_assessed=[],
+                overall_quality_score=5.0,
+                has_primary_sources=False,
+                has_wire_services=False,
+                confidence=0.0,
+                overall_assessment=f"LLM assessment failed: {str(e)}",
+            )
+
+    def analyze(self, articles: list[dict[str, str]]) -> SourcingAnalysisResult:
+        """
+        Analyze sourcing quality across one or more articles.
+
+        Args:
+            articles: List of article dicts with 'text' key containing article text
+
+        Returns:
+            SourcingAnalysisResult with quality assessment
+        """
+        # Extract all links from all articles
+        all_links = []
+        for article in articles:
+            text = article.get("text", "")
+            links = self._extract_links(text)
+            all_links.extend(links)
+
+        # Get unique domains
+        unique_domains = self._extract_domains(all_links)
+
+        # No links found - return default mediocre score
+        if not unique_domains:
+            return SourcingAnalysisResult(
+                score=5.0,
+                avg_sources_per_article=0.0,
+                total_sources_found=0,
+                unique_domains=0,
+                has_hyperlinks=False,
+                source_assessments=[],
+                has_primary_sources=False,
+                has_wire_services=False,
+                confidence=0.5,
+                reasoning="No source links found in articles. Cannot assess sourcing quality.",
+            )
+
+        # Assess with LLM
+        llm_output = self._assess_with_llm(unique_domains)
+
+        # Calculate metrics
+        avg_sources = len(all_links) / len(articles) if articles else 0.0
+
+        return SourcingAnalysisResult(
+            score=llm_output.overall_quality_score,
+            avg_sources_per_article=round(avg_sources, 2),
+            total_sources_found=len(all_links),
+            unique_domains=len(unique_domains),
+            has_hyperlinks=True,
+            source_assessments=llm_output.sources_assessed,
+            has_primary_sources=llm_output.has_primary_sources,
+            has_wire_services=llm_output.has_wire_services,
+            confidence=llm_output.confidence,
+            reasoning=llm_output.overall_assessment,
+        )
+
+
+# =============================================================================
 # Convenience Functions
 # =============================================================================
 
@@ -1058,6 +1593,35 @@ def classify_media_type(url_or_domain: str) -> MediaTypeClassification:
     """
     analyzer = MediaTypeAnalyzer()
     return analyzer.analyze(url_or_domain)
+
+
+def search_fact_checks(url_or_domain: str, outlet_name: str | None = None) -> FactCheckAnalysisResult:
+    """
+    Convenience function to search for fact checks about a media outlet.
+
+    Args:
+        url_or_domain: URL or domain to analyze
+        outlet_name: Optional human-readable name
+
+    Returns:
+        FactCheckAnalysisResult with findings and score
+    """
+    analyzer = FactCheckSearcher()
+    return analyzer.analyze(url_or_domain, outlet_name)
+
+
+def analyze_sourcing(articles: list[dict[str, str]]) -> SourcingAnalysisResult:
+    """
+    Convenience function to analyze sourcing quality in articles.
+
+    Args:
+        articles: List of article dicts with 'text' key
+
+    Returns:
+        SourcingAnalysisResult with quality assessment
+    """
+    analyzer = SourcingAnalyzer()
+    return analyzer.analyze(articles)
 
 
 # =============================================================================
