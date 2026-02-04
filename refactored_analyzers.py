@@ -27,6 +27,8 @@ from schemas import (
     ArticleType,
     MediaType,
     MediaTypeClassification,
+    MediaTypeLLMOutput,
+    MediaTypeSource,
     TrafficData,
     TrafficEstimate,
     TrafficSource,
@@ -663,21 +665,33 @@ Determine the traffic tier based on any traffic data, rankings, or popularity in
 
 
 # =============================================================================
+# MediaTypeAnalyzer Configuration
+# =============================================================================
+
+# Default known media types lookup file
+KNOWN_MEDIA_TYPES_PATH = "known_media_types.csv"
+
+
+# =============================================================================
 # MediaTypeAnalyzer
 # =============================================================================
 
 
 class MediaTypeAnalyzer:
     """
-    Classifies media outlet type using Wikipedia/web search and LLM.
+    Classifies media outlet type using a hybrid deterministic + LLM approach.
 
-    This analyzer does NOT use article content for classification.
-    Instead, it searches for "{site_name} wikipedia type of media"
-    and uses the LLM to interpret the results.
+    This analyzer implements a two-tier strategy:
+    1. **Deterministic (Lookup)**: First checks the known_media_types.csv for instant,
+       reproducible classification of major outlets.
+    2. **LLM Fallback**: For unknown domains, searches for information and uses
+       LLM to parse the results.
 
     Attributes:
-        llm: LangChain LLM with structured output binding
+        llm: LangChain LLM with structured output for parsing
         search: DuckDuckGo search instance
+        known_types: Dict mapping domain -> MediaType (from lookup file)
+        lookup_loaded: Whether lookup table is available
     """
 
     SYSTEM_PROMPT = """You are classifying the type of media outlet based on search results.
@@ -685,22 +699,22 @@ class MediaTypeAnalyzer:
 Media Type Definitions:
 
 TV: Television broadcast networks and channels
-    - Examples: CNN, BBC, Fox News, NBC, ABC
+    - Examples: CNN, BBC, Fox News, NBC, ABC, MSNBC, Al Jazeera
 
 NEWSPAPER: Traditional print newspapers (may have online presence)
-    - Examples: New York Times, Washington Post, The Guardian
+    - Examples: New York Times, Washington Post, The Guardian, Wall Street Journal
 
 WEBSITE: Online-only news or content sites (digital native)
-    - Examples: Vox, BuzzFeed News, The Daily Wire, Axios
+    - Examples: Vox, BuzzFeed News, The Daily Wire, Axios, Politico, HuffPost
 
 MAGAZINE: Periodical publications (weekly/monthly)
-    - Examples: Time, The Economist, The Atlantic, Newsweek
+    - Examples: Time, The Economist, The Atlantic, Newsweek, The New Yorker
 
 RADIO: Radio broadcast networks
-    - Examples: NPR, BBC Radio, iHeartRadio
+    - Examples: NPR, BBC Radio, Voice of America
 
 NEWS_AGENCY: Wire services that provide content to other outlets
-    - Examples: Reuters, Associated Press (AP), AFP
+    - Examples: Reuters, Associated Press (AP), AFP, UPI
 
 BLOG: Personal or small group blogs
     - Usually individual authors, informal style
@@ -720,6 +734,7 @@ For example, NYT is a NEWSPAPER even though they have a website and podcasts."""
         self,
         model: str = "gpt-4o-mini",
         temperature: float = 0.0,
+        lookup_path: Optional[str] = None,
     ):
         """
         Initialize the MediaTypeAnalyzer.
@@ -727,11 +742,110 @@ For example, NYT is a NEWSPAPER even though they have a website and podcasts."""
         Args:
             model: OpenAI model to use
             temperature: LLM temperature (0 for deterministic)
+            lookup_path: Path to known_media_types.csv (default: known_media_types.csv)
         """
-        self.llm = get_llm(model, temperature).with_structured_output(
-            MediaTypeClassification
-        )
+        self.llm = get_llm(model, temperature).with_structured_output(MediaTypeLLMOutput)
         self.search = DDGS()
+
+        # Initialize lookup data
+        self.known_types: dict[str, MediaType] = {}
+        self.lookup_loaded = False
+        self._lookup_path = lookup_path or KNOWN_MEDIA_TYPES_PATH
+
+        # Load lookup table
+        self._load_known_types()
+
+    def _load_known_types(self) -> bool:
+        """
+        Load the known media types lookup table.
+
+        Returns:
+            True if loaded successfully, False otherwise
+        """
+        import os
+        import csv
+
+        lookup_path = self._lookup_path
+
+        if not os.path.exists(lookup_path):
+            logger.warning(f"Known media types file not found at {lookup_path}, will use LLM only")
+            return False
+
+        try:
+            with open(lookup_path, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    # Skip comments and empty lines
+                    if not row or row[0].startswith("#"):
+                        continue
+                    if len(row) >= 2:
+                        domain = row[0].strip().lower()
+                        media_type_str = row[1].strip()
+
+                        # Map string to MediaType enum
+                        try:
+                            media_type = MediaType(media_type_str)
+                            self.known_types[domain] = media_type
+                        except ValueError:
+                            # Try case-insensitive match
+                            for mt in MediaType:
+                                if mt.value.lower() == media_type_str.lower():
+                                    self.known_types[domain] = mt
+                                    break
+
+            self.lookup_loaded = len(self.known_types) > 0
+            if self.lookup_loaded:
+                logger.info(f"Loaded {len(self.known_types)} known media types from {lookup_path}")
+            return self.lookup_loaded
+
+        except Exception as e:
+            logger.error(f"Failed to load known media types: {e}")
+            return False
+
+    def _lookup_media_type(self, domain: str) -> Optional[MediaType]:
+        """
+        Look up a domain's media type in the known types table.
+
+        Args:
+            domain: The domain to look up (e.g., "bbc.com")
+
+        Returns:
+            MediaType if found, None otherwise
+        """
+        if not self.lookup_loaded:
+            return None
+
+        # Normalize domain
+        domain_lower = domain.lower().strip()
+
+        # Direct lookup
+        if domain_lower in self.known_types:
+            return self.known_types[domain_lower]
+
+        # Try with www prefix
+        if not domain_lower.startswith("www."):
+            www_domain = f"www.{domain_lower}"
+            if www_domain in self.known_types:
+                return self.known_types[www_domain]
+
+        # Try without subdomain (e.g., news.bbc.com -> bbc.com)
+        parts = domain_lower.split(".")
+        if len(parts) > 2:
+            base_domain = ".".join(parts[-2:])
+            if base_domain in self.known_types:
+                return self.known_types[base_domain]
+
+        return None
+
+    def _extract_domain(self, url: str) -> str:
+        """Extract the root domain from a URL."""
+        parsed = urlparse(url if url.startswith("http") else f"https://{url}")
+        domain = parsed.netloc or parsed.path
+        # Remove www. prefix for consistency
+        domain = re.sub(r"^www\.", "", domain)
+        # Remove any path components
+        domain = domain.split("/")[0]
+        return domain.lower()
 
     def _extract_site_name(self, url_or_domain: str) -> str:
         """
@@ -743,13 +857,10 @@ For example, NYT is a NEWSPAPER even though they have a website and podcasts."""
         Returns:
             Clean site name for searching
         """
-        # Parse URL
         parsed = urlparse(
             url_or_domain if url_or_domain.startswith("http") else f"https://{url_or_domain}"
         )
         domain = parsed.netloc or parsed.path
-
-        # Remove www. and TLD
         domain = re.sub(r"^www\.", "", domain)
 
         # Extract site name (remove TLD for cleaner search)
@@ -760,29 +871,29 @@ For example, NYT is a NEWSPAPER even though they have a website and podcasts."""
 
     def _search_media_type(self, site_name: str, domain: str) -> Optional[str]:
         """
-        Search for media type information.
+        Search for media type information using improved query.
 
         Args:
             site_name: Clean site name
-            domain: Full domain for fallback search
+            domain: Full domain for search
 
         Returns:
             Search result snippet or None
         """
-        # Primary query targeting Wikipedia
-        query = f"{site_name} wikipedia type of media"
+        # Improved query per PI's suggestion - more direct question format
+        query = f'"{domain}" type of media outlet newspaper television website magazine'
 
         try:
-            results = list(self.search.text(query, max_results=3))
+            results = list(self.search.text(query, max_results=5))
 
             if not results:
-                # Fallback query
-                query = f"{domain} news outlet type wikipedia"
+                # Fallback query - Wikipedia focused
+                query = f"{site_name} wikipedia media company"
                 results = list(self.search.text(query, max_results=3))
 
             if results:
                 snippets = []
-                for r in results[:3]:
+                for r in results[:5]:
                     title = r.get("title", "")
                     body = r.get("body", "")
                     snippets.append(f"{title}: {body}")
@@ -794,45 +905,27 @@ For example, NYT is a NEWSPAPER even though they have a website and podcasts."""
             logger.warning(f"Media type search failed for {site_name}: {e}")
             return None
 
-    def analyze(self, url_or_domain: str) -> MediaTypeClassification:
+    def _parse_with_llm(self, site_name: str, domain: str, snippet: str) -> MediaTypeLLMOutput:
         """
-        Classify the media type for a given URL or domain.
+        Use LLM to parse media type from search snippet.
 
         Args:
-            url_or_domain: URL or domain to classify
+            site_name: Clean site name
+            domain: Full domain
+            snippet: Search result snippet to parse
 
         Returns:
-            MediaTypeClassification with type, confidence, and reasoning
+            MediaTypeLLMOutput with type, confidence, and reasoning
         """
-        # Extract site name and domain
-        parsed = urlparse(
-            url_or_domain if url_or_domain.startswith("http") else f"https://{url_or_domain}"
-        )
-        domain = parsed.netloc or parsed.path
-        domain = re.sub(r"^www\.", "", domain)
-        site_name = self._extract_site_name(url_or_domain)
-
-        # Search for media type information
-        search_snippet = self._search_media_type(site_name, domain)
-
-        if not search_snippet:
-            return MediaTypeClassification(
-                media_type=MediaType.UNKNOWN,
-                confidence=0.0,
-                source_snippet="No search results found",
-                reasoning="Could not find information about this media outlet",
-            )
-
-        # Use LLM to classify
         user_prompt = f"""Classify the media type for: {site_name} ({domain})
 
 SEARCH RESULTS:
-{search_snippet}
+{snippet}
 
 Based on these search results, what type of media outlet is this?"""
 
         try:
-            result: MediaTypeClassification = self.llm.invoke(
+            result: MediaTypeLLMOutput = self.llm.invoke(
                 [
                     {"role": "system", "content": self.SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
@@ -842,12 +935,81 @@ Based on these search results, what type of media outlet is this?"""
 
         except Exception as e:
             logger.error(f"MediaTypeAnalyzer LLM call failed: {e}")
-            return MediaTypeClassification(
+            return MediaTypeLLMOutput(
                 media_type=MediaType.UNKNOWN,
                 confidence=0.0,
-                source_snippet=search_snippet[:200] if search_snippet else "",
-                reasoning=f"Classification failed: {str(e)}",
+                reasoning=f"LLM classification failed: {str(e)}",
             )
+
+    def analyze(self, url_or_domain: str) -> MediaTypeClassification:
+        """
+        Classify the media type for a given URL or domain using hybrid approach.
+
+        Strategy:
+        1. Check known_media_types.csv first (deterministic, instant)
+        2. If not found, search and use LLM to classify
+
+        Args:
+            url_or_domain: URL or domain to classify
+
+        Returns:
+            MediaTypeClassification with type, confidence, source, and reasoning
+        """
+        domain = self._extract_domain(url_or_domain)
+        site_name = self._extract_site_name(url_or_domain)
+
+        # 1. Try deterministic lookup first
+        known_type = self._lookup_media_type(domain)
+
+        if known_type is not None:
+            return MediaTypeClassification(
+                media_type=known_type,
+                confidence=1.0,  # Deterministic = 100% confidence
+                source=MediaTypeSource.LOOKUP,
+                source_snippet=None,
+                reasoning=f"Found in known media types database as {known_type.value}",
+            )
+
+        # 2. Fall back to search + LLM
+        search_snippet = self._search_media_type(site_name, domain)
+
+        if search_snippet:
+            llm_result = self._parse_with_llm(site_name, domain, search_snippet)
+            return MediaTypeClassification(
+                media_type=llm_result.media_type,
+                confidence=llm_result.confidence,
+                source=MediaTypeSource.LLM,
+                source_snippet=search_snippet[:500] if search_snippet else None,
+                reasoning=llm_result.reasoning,
+            )
+
+        # 3. No data available - return fallback
+        return MediaTypeClassification(
+            media_type=MediaType.UNKNOWN,
+            confidence=0.0,
+            source=MediaTypeSource.FALLBACK,
+            source_snippet=None,
+            reasoning="Could not find information about this media outlet",
+        )
+
+    def get_lookup_stats(self) -> dict:
+        """
+        Get statistics about the loaded lookup table.
+
+        Returns:
+            Dict with lookup table stats
+        """
+        # Count by type
+        type_counts = {}
+        for media_type in self.known_types.values():
+            type_counts[media_type.value] = type_counts.get(media_type.value, 0) + 1
+
+        return {
+            "loaded": self.lookup_loaded,
+            "total_domains": len(self.known_types),
+            "by_type": type_counts,
+            "path": self._lookup_path,
+        }
 
 
 # =============================================================================
@@ -968,16 +1130,30 @@ if __name__ == "__main__":
         if traffic_data.whois_error:
             print(f"    WHOIS Error: {traffic_data.whois_error}")
 
-    # Test MediaTypeAnalyzer
-    print("\n3. MediaTypeAnalyzer Test")
+    # Test MediaTypeAnalyzer with hybrid approach
+    print("\n3. MediaTypeAnalyzer Test (Hybrid Lookup + LLM)")
     print("-" * 50)
-    test_outlet = "nytimes.com"
+
     media_analyzer = MediaTypeAnalyzer()
-    media_result = media_analyzer.analyze(test_outlet)
-    print(f"Outlet: {test_outlet}")
-    print(f"Media Type: {media_result.media_type.value}")
-    print(f"Confidence: {media_result.confidence:.2f}")
-    print(f"Reasoning: {media_result.reasoning}")
+
+    # Show lookup stats
+    lookup_stats = media_analyzer.get_lookup_stats()
+    print(f"\nKnown Media Types Status:")
+    print(f"  Loaded: {lookup_stats['loaded']}")
+    print(f"  Total Outlets: {lookup_stats['total_domains']}")
+    if lookup_stats['by_type']:
+        print(f"  By Type: {lookup_stats['by_type']}")
+
+    # Test with outlets (mix of lookup and LLM)
+    test_outlets = ["nytimes.com", "cnn.com", "obscure-blog-site.com"]
+
+    for test_outlet in test_outlets:
+        print(f"\n  Testing: {test_outlet}")
+        media_result = media_analyzer.analyze(test_outlet)
+        print(f"    Media Type: {media_result.media_type.value}")
+        print(f"    Source: {media_result.source.value}")
+        print(f"    Confidence: {media_result.confidence:.2f}")
+        print(f"    Reasoning: {media_result.reasoning}")
 
     print("\n" + "=" * 70)
     print("DEMO COMPLETE")

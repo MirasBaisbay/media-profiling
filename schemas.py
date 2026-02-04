@@ -67,12 +67,20 @@ class MediaType(str, Enum):
     UNKNOWN = "Unknown"
 
 
-class MediaTypeClassification(BaseModel):
-    """
-    Structured output for media outlet type classification.
+class MediaTypeSource(str, Enum):
+    """Source of media type classification."""
 
-    Used by MediaTypeAnalyzer to classify media outlets based on
-    Wikipedia/web search information.
+    LOOKUP = "Lookup"  # From known_media_types.csv (deterministic)
+    LLM = "LLM"  # From search + LLM parsing
+    FALLBACK = "Fallback"  # Default when no data available
+
+
+class MediaTypeLLMOutput(BaseModel):
+    """
+    Structured output for LLM media type parsing.
+
+    This is the schema used by the LLM when parsing search results.
+    It does not include 'source' since that's determined by the analyzer.
     """
 
     media_type: MediaType = Field(
@@ -83,8 +91,34 @@ class MediaTypeClassification(BaseModel):
         le=1.0,
         description="Confidence score between 0.0 and 1.0"
     )
-    source_snippet: str = Field(
-        description="The relevant snippet from search results used for classification"
+    reasoning: str = Field(
+        description="Brief explanation of how the media type was determined from search results"
+    )
+
+
+class MediaTypeClassification(BaseModel):
+    """
+    Complete media type classification result.
+
+    Used by MediaTypeAnalyzer to return classification results from
+    either lookup table or web search + LLM.
+    """
+
+    media_type: MediaType = Field(
+        description="The type of media outlet"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence score between 0.0 and 1.0"
+    )
+    source: MediaTypeSource = Field(
+        default=MediaTypeSource.FALLBACK,
+        description="Source of the classification (Lookup, LLM, or Fallback)"
+    )
+    source_snippet: Optional[str] = Field(
+        default=None,
+        description="The relevant snippet from search results (LLM method only)"
     )
     reasoning: str = Field(
         description="Brief explanation of how the media type was determined"
