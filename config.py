@@ -253,6 +253,97 @@ class FactualWeights:
     bias_propaganda: float = 0.10
 
 # =============================================================================
+# MBFC CATEGORY DESCRIPTIONS (For Report Generation)
+# =============================================================================
+
+BIAS_CATEGORY_DESCRIPTIONS = {
+    "Extreme Left": (
+        "EXTREME LEFT\n"
+        "These sources exclusively promote left-wing policies and rarely cite credible "
+        "sources. They may use strong loaded language and appeal to emotion. Most fail "
+        "fact checks and do not correct errors."
+    ),
+    "Left": (
+        "LEFT BIAS\n"
+        "These sources moderately to strongly favor liberal perspectives. They may "
+        "utilize strong loaded words (wording that attempts to influence an audience "
+        "by appeals to emotion or stereotypes), publish misleading reports, and omit "
+        "information that may damage liberal causes. Some sources in this category "
+        "may be untrustworthy."
+    ),
+    "Left-Center": (
+        "LEFT-CENTER BIAS\n"
+        "These sources have a slight to moderate liberal bias. They often publish "
+        "factual information that utilizes loaded words (wording that attempts to "
+        "influence an audience by appeals to emotion or stereotypes) to favor liberal "
+        "causes. These sources are generally trustworthy for information but may "
+        "require further investigation."
+    ),
+    "Least Biased": (
+        "LEAST BIASED\n"
+        "These sources have minimal bias and use very few loaded words (wording that "
+        "attempts to influence an audience by appeals to emotion or stereotypes). "
+        "The reporting is factual and usually sourced. These are the most credible "
+        "media sources."
+    ),
+    "Right-Center": (
+        "RIGHT-CENTER BIAS\n"
+        "These sources have a slight to moderate conservative bias. They often publish "
+        "factual information that utilizes loaded words (wording that attempts to "
+        "influence an audience by appeals to emotion or stereotypes) to favor "
+        "conservative causes. These sources are generally trustworthy for information "
+        "but may require further investigation."
+    ),
+    "Right": (
+        "RIGHT BIAS\n"
+        "These sources moderately to strongly favor conservative perspectives. They may "
+        "utilize strong loaded words (wording that attempts to influence an audience "
+        "by appeals to emotion or stereotypes), publish misleading reports, and omit "
+        "information that may damage conservative causes. Some sources in this category "
+        "may be untrustworthy."
+    ),
+    "Extreme Right": (
+        "EXTREME RIGHT\n"
+        "These sources exclusively promote right-wing policies and rarely cite credible "
+        "sources. They may use strong loaded language and appeal to emotion. Most fail "
+        "fact checks and do not correct errors."
+    )
+}
+
+FACTUALITY_DESCRIPTIONS = {
+    "Very High": "Sources that always use credible sources, are well-sourced, and have a clean fact check record.",
+    "High": "Sources that are generally reliable with minimal failed fact checks and good sourcing practices.",
+    "Mostly Factual": "Sources that are generally reliable but may have occasional minor errors or unsourced claims.",
+    "Mixed": "Sources that do not always use proper sourcing or have multiple failed fact checks.",
+    "Low": "Sources that rarely use credible sources and have numerous failed fact checks.",
+    "Very Low": "Sources that consistently fail fact checks and promote misinformation."
+}
+
+CREDIBILITY_DESCRIPTIONS = {
+    "High Credibility": "This source has earned a high credibility rating based on factual reporting, minimal bias, and transparent practices.",
+    "Medium Credibility": "This source has a moderate credibility rating. While generally reliable, some caution is advised.",
+    "Low Credibility": "This source has a low credibility rating due to failed fact checks, high bias, or lack of transparency."
+}
+
+# =============================================================================
+# COUNTRY NAME MAPPING
+# =============================================================================
+COUNTRY_NAMES = {
+    "US": "United States", "GB": "United Kingdom", "CA": "Canada",
+    "AU": "Australia", "DE": "Germany", "FR": "France", "IT": "Italy",
+    "ES": "Spain", "NL": "Netherlands", "BE": "Belgium", "CH": "Switzerland",
+    "AT": "Austria", "SE": "Sweden", "NO": "Norway", "DK": "Denmark",
+    "FI": "Finland", "IE": "Ireland", "NZ": "New Zealand", "JP": "Japan",
+    "KR": "South Korea", "CN": "China", "IN": "India", "BR": "Brazil",
+    "MX": "Mexico", "RU": "Russia", "ZA": "South Africa", "KZ": "Kazakhstan",
+    "PL": "Poland", "CZ": "Czech Republic", "HU": "Hungary", "RO": "Romania",
+    "GR": "Greece", "PT": "Portugal", "IL": "Israel", "AE": "United Arab Emirates",
+    "SA": "Saudi Arabia", "EG": "Egypt", "NG": "Nigeria", "KE": "Kenya",
+    "UA": "Ukraine", "TR": "Turkey", "TH": "Thailand", "VN": "Vietnam",
+    "PH": "Philippines", "ID": "Indonesia", "MY": "Malaysia", "SG": "Singapore"
+}
+
+# =============================================================================
 # MODEL CONFIGURATION
 # =============================================================================
 @dataclass
