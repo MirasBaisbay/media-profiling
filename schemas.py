@@ -517,3 +517,290 @@ class SourcingAnalysisResult(BaseModel):
     reasoning: str = Field(
         description="Explanation of the sourcing analysis"
     )
+
+
+# =============================================================================
+# Editorial Bias Schemas
+# =============================================================================
+
+
+class BiasDirection(str, Enum):
+    """Political bias direction on the left-right spectrum."""
+
+    EXTREME_LEFT = "Extreme Left"
+    LEFT = "Left"
+    LEFT_CENTER = "Left-Center"
+    CENTER = "Center"
+    RIGHT_CENTER = "Right-Center"
+    RIGHT = "Right"
+    EXTREME_RIGHT = "Extreme Right"
+
+
+class PolicyDomain(str, Enum):
+    """Major policy domains for bias assessment."""
+
+    ECONOMIC = "Economic Policy"
+    SOCIAL = "Social Issues"
+    ENVIRONMENTAL = "Environmental Policy"
+    HEALTHCARE = "Healthcare"
+    IMMIGRATION = "Immigration"
+    FOREIGN_POLICY = "Foreign Policy"
+    GUN_RIGHTS = "Gun Rights"
+    EDUCATION = "Education"
+
+
+class PolicyPosition(BaseModel):
+    """Assessment of outlet's position on a specific policy domain."""
+
+    domain: PolicyDomain = Field(
+        description="The policy domain being assessed"
+    )
+    leaning: BiasDirection = Field(
+        description="The detected leaning on this policy"
+    )
+    indicators: list[str] = Field(
+        default_factory=list,
+        description="Specific indicators or quotes showing this position"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in this assessment"
+    )
+
+
+class EditorialBiasLLMOutput(BaseModel):
+    """Structured LLM output for editorial bias analysis."""
+
+    overall_bias: BiasDirection = Field(
+        description="Overall editorial bias direction"
+    )
+    bias_score: float = Field(
+        ge=-10.0,
+        le=10.0,
+        description="Numeric score: -10 (far left) to +10 (far right), 0 = center"
+    )
+    policy_positions: list[PolicyPosition] = Field(
+        default_factory=list,
+        description="Positions on specific policy domains if detectable"
+    )
+    uses_loaded_language: bool = Field(
+        description="Whether outlet uses politically loaded language"
+    )
+    loaded_language_examples: list[str] = Field(
+        default_factory=list,
+        description="Examples of loaded language found"
+    )
+    story_selection_bias: Optional[str] = Field(
+        default=None,
+        description="Notes on biased story selection patterns if detected"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Overall confidence in bias assessment"
+    )
+    reasoning: str = Field(
+        description="Detailed explanation of bias assessment"
+    )
+
+
+class EditorialBiasResult(BaseModel):
+    """Complete editorial bias analysis result."""
+
+    domain: str = Field(
+        description="The domain that was analyzed"
+    )
+    outlet_name: Optional[str] = Field(
+        default=None,
+        description="Human-readable outlet name"
+    )
+    overall_bias: BiasDirection = Field(
+        description="Overall editorial bias direction"
+    )
+    bias_score: float = Field(
+        ge=-10.0,
+        le=10.0,
+        description="Numeric score: -10 (far left) to +10 (far right)"
+    )
+    mbfc_label: str = Field(
+        description="MBFC-style label (Left, Left-Center, Center, etc.)"
+    )
+    policy_positions: list[PolicyPosition] = Field(
+        default_factory=list,
+        description="Positions on specific policy domains"
+    )
+    uses_loaded_language: bool = Field(
+        default=False,
+        description="Whether outlet uses loaded language"
+    )
+    loaded_language_examples: list[str] = Field(
+        default_factory=list,
+        description="Examples of loaded language"
+    )
+    story_selection_bias: Optional[str] = Field(
+        default=None,
+        description="Notes on story selection bias"
+    )
+    articles_analyzed: int = Field(
+        ge=0,
+        description="Number of articles analyzed"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the assessment"
+    )
+    reasoning: str = Field(
+        description="Explanation of bias assessment"
+    )
+
+
+# =============================================================================
+# Pseudoscience Detection Schemas
+# =============================================================================
+
+
+class PseudoscienceCategory(str, Enum):
+    """Categories of pseudoscientific content."""
+
+    # Health-related pseudoscience
+    ANTI_VACCINATION = "Anti-Vaccination"
+    ALTERNATIVE_MEDICINE = "Alternative Medicine"
+    CANCER_CURE_CLAIMS = "Alternative Cancer Treatments"
+    AIDS_DENIALISM = "AIDS Denialism"
+    COVID_MISINFORMATION = "COVID-19 Misinformation"
+    MASK_MISINFORMATION = "Mask Misinformation"
+    HOMEOPATHY = "Homeopathy"
+    DETOX_CLAIMS = "Detoxification Claims"
+    ESSENTIAL_OILS_CURE = "Essential Oils Cure Claims"
+
+    # Climate/Environment
+    CLIMATE_DENIAL = "Climate Change Denialism"
+    GMO_DANGERS = "GMO Danger Claims"
+    CHEMTRAILS = "Chemtrails Conspiracy"
+    FIVE_G_HEALTH = "5G Health Conspiracy"
+
+    # Paranormal/Supernatural
+    ASTROLOGY = "Astrology"
+    PSYCHIC_CLAIMS = "Psychic Claims"
+    ANCIENT_ASTRONAUTS = "Ancient Astronauts"
+    CRYSTAL_HEALING = "Crystal Healing"
+    FAITH_HEALING = "Faith Healing"
+
+    # Conspiracy theories
+    FLAT_EARTH = "Flat Earth"
+    MOON_LANDING_HOAX = "Moon Landing Conspiracy"
+    DEEP_STATE = "Deep State Conspiracy"
+    NEW_WORLD_ORDER = "New World Order"
+    QAnon = "QAnon"
+
+    # Other
+    PSEUDOARCHAEOLOGY = "Pseudoarchaeology"
+    CRYPTOZOOLOGY = "Cryptozoology"
+    NUMEROLOGY = "Numerology"
+    OTHER = "Other Pseudoscience"
+
+
+class PseudoscienceSeverity(str, Enum):
+    """Severity of pseudoscience promotion."""
+
+    PROMOTES = "Promotes"  # Actively promotes pseudoscience as fact
+    PRESENTS_UNCRITICALLY = "Presents Uncritically"  # Reports without debunking
+    MIXED = "Mixed"  # Sometimes promotes, sometimes critical
+    NONE_DETECTED = "None Detected"  # No pseudoscience found
+
+
+class PseudoscienceIndicator(BaseModel):
+    """A single instance of pseudoscience content detected."""
+
+    category: PseudoscienceCategory = Field(
+        description="Category of pseudoscience detected"
+    )
+    severity: PseudoscienceSeverity = Field(
+        description="How the outlet treats this pseudoscience"
+    )
+    evidence: str = Field(
+        description="Quote or description of the pseudoscience content"
+    )
+    scientific_consensus: str = Field(
+        description="Brief statement of actual scientific consensus on this topic"
+    )
+
+
+class PseudoscienceLLMOutput(BaseModel):
+    """Structured LLM output for pseudoscience detection."""
+
+    indicators: list[PseudoscienceIndicator] = Field(
+        default_factory=list,
+        description="Pseudoscience indicators found in content"
+    )
+    promotes_pseudoscience: bool = Field(
+        description="Whether the outlet actively promotes pseudoscience"
+    )
+    overall_severity: PseudoscienceSeverity = Field(
+        description="Overall severity of pseudoscience content"
+    )
+    science_reporting_quality: float = Field(
+        ge=0.0,
+        le=10.0,
+        description="Quality of science reporting (0=excellent, 10=promotes pseudoscience)"
+    )
+    respects_scientific_consensus: bool = Field(
+        description="Whether outlet generally respects scientific consensus"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the assessment"
+    )
+    reasoning: str = Field(
+        description="Explanation of pseudoscience assessment"
+    )
+
+
+class PseudoscienceAnalysisResult(BaseModel):
+    """Complete pseudoscience analysis result."""
+
+    domain: str = Field(
+        description="The domain that was analyzed"
+    )
+    outlet_name: Optional[str] = Field(
+        default=None,
+        description="Human-readable outlet name"
+    )
+    score: float = Field(
+        ge=0.0,
+        le=10.0,
+        description="MBFC-style score (0=pro-science, 10=promotes pseudoscience)"
+    )
+    promotes_pseudoscience: bool = Field(
+        description="Whether outlet promotes pseudoscience"
+    )
+    overall_severity: PseudoscienceSeverity = Field(
+        description="Overall severity classification"
+    )
+    categories_found: list[PseudoscienceCategory] = Field(
+        default_factory=list,
+        description="Categories of pseudoscience found"
+    )
+    indicators: list[PseudoscienceIndicator] = Field(
+        default_factory=list,
+        description="Detailed pseudoscience indicators"
+    )
+    respects_scientific_consensus: bool = Field(
+        default=True,
+        description="Whether outlet respects scientific consensus"
+    )
+    articles_analyzed: int = Field(
+        ge=0,
+        description="Number of articles analyzed"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the assessment"
+    )
+    reasoning: str = Field(
+        description="Explanation of pseudoscience assessment"
+    )
