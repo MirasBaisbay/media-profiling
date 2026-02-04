@@ -1,0 +1,37 @@
+domain,expected_tier,expected_in_tranco,notes
+bbc.com,High,True,Major global news broadcaster - should be top 1000
+cnn.com,High,True,Major US cable news network
+nytimes.com,High,True,Major US newspaper of record
+reuters.com,High,True,Global news agency
+theguardian.com,High,True,Major UK newspaper
+washingtonpost.com,High,True,Major US newspaper
+foxnews.com,High,True,Major US cable news network
+npr.org,High,True,US public radio network
+bbc.co.uk,High,True,BBC UK domain
+aljazeera.com,High,True,Major international news network
+politico.com,Medium,True,Political news website
+axios.com,Medium,True,Digital media company
+vox.com,Medium,True,Digital media explanatory journalism
+thehill.com,Medium,True,US political journalism
+dailywire.com,Medium,True,Conservative news website
+breitbart.com,Medium,True,Conservative news website
+huffpost.com,High,True,Digital news aggregator
+buzzfeednews.com,Medium,True,Digital news outlet
+slate.com,Medium,True,Online magazine
+salon.com,Medium,True,Online magazine
+reason.com,Medium,True,Libertarian magazine
+jacobin.com,Low,True,Socialist magazine - smaller audience
+currentaffairs.org,Low,False,Small progressive magazine
+theintercept.com,Medium,True,Investigative journalism outlet
+propublica.org,Medium,True,Nonprofit investigative journalism
+motherjones.com,Medium,True,Progressive news magazine
+nationalreview.com,Medium,True,Conservative magazine
+theamericanconservative.com,Low,True,Conservative magazine
+commondreams.org,Low,True,Progressive news website
+truthout.org,Low,False,Progressive news website - may not be in top 1M
+consortiumnews.com,Low,False,Independent news website
+mintpressnews.com,Low,False,Independent news website
+grayzone.com,Low,False,Independent investigative outlet
+popularresistance.org,Minimal,False,Activist news site - likely not in Tranco
+wsws.org,Low,False,Socialist news website
+liberationnews.org,Minimal,False,Socialist news outlet - likely not in Tranco
