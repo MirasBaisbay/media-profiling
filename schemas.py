@@ -299,3 +299,221 @@ class ValidationReport(BaseModel):
     mismatches: list[ValidationResult] = Field(
         description="Only the incorrect predictions"
     )
+
+
+# =============================================================================
+# Fact Check Schemas
+# =============================================================================
+
+
+class FactCheckVerdict(str, Enum):
+    """Verdict from a fact-checker."""
+
+    TRUE = "True"
+    MOSTLY_TRUE = "Mostly True"
+    HALF_TRUE = "Half True"
+    MIXED = "Mixed"
+    MOSTLY_FALSE = "Mostly False"
+    FALSE = "False"
+    PANTS_ON_FIRE = "Pants on Fire"
+    UNPROVEN = "Unproven"
+    MISLEADING = "Misleading"
+    NOT_RATED = "Not Rated"
+
+
+class FactCheckSource(str, Enum):
+    """Source of fact check data."""
+
+    SEARCH = "Search"  # From direct fact-checker site search
+    FALLBACK = "Fallback"  # No data found
+
+
+class FactCheckFinding(BaseModel):
+    """A single fact check finding parsed from search results."""
+
+    source_site: str = Field(
+        description="The fact-checking organization (e.g., 'PolitiFact', 'Snopes')"
+    )
+    claim_summary: str = Field(
+        description="Brief summary of the claim that was fact-checked"
+    )
+    verdict: FactCheckVerdict = Field(
+        description="The verdict given by the fact-checker"
+    )
+    url: Optional[str] = Field(
+        default=None,
+        description="URL to the fact-check article if available"
+    )
+
+
+class FactCheckLLMOutput(BaseModel):
+    """Structured LLM output for parsing fact-check search results."""
+
+    findings: list[FactCheckFinding] = Field(
+        default_factory=list,
+        description="List of fact check findings extracted from search results"
+    )
+    failed_count: int = Field(
+        ge=0,
+        description="Number of FALSE/MOSTLY_FALSE/PANTS_ON_FIRE/MISLEADING verdicts"
+    )
+    total_count: int = Field(
+        ge=0,
+        description="Total number of fact checks found"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the parsing accuracy"
+    )
+    reasoning: str = Field(
+        description="Explanation of findings and any ambiguities"
+    )
+
+
+class FactCheckAnalysisResult(BaseModel):
+    """Complete fact check analysis result."""
+
+    domain: str = Field(
+        description="The domain that was analyzed"
+    )
+    outlet_name: Optional[str] = Field(
+        default=None,
+        description="Human-readable outlet name if known"
+    )
+    failed_checks_count: int = Field(
+        ge=0,
+        description="Number of failed fact checks found"
+    )
+    total_checks_count: int = Field(
+        ge=0,
+        description="Total number of fact checks found"
+    )
+    score: float = Field(
+        ge=0.0,
+        le=10.0,
+        description="MBFC-style score (0=excellent, 10=very poor)"
+    )
+    source: FactCheckSource = Field(
+        default=FactCheckSource.FALLBACK,
+        description="Source of the fact check data"
+    )
+    findings: list[FactCheckFinding] = Field(
+        default_factory=list,
+        description="Individual fact check findings"
+    )
+    search_snippets: Optional[str] = Field(
+        default=None,
+        description="Combined search snippets used for analysis"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Overall confidence in the analysis"
+    )
+    reasoning: str = Field(
+        description="Explanation of the fact check analysis"
+    )
+
+
+# =============================================================================
+# Sourcing Quality Schemas
+# =============================================================================
+
+
+class SourceQuality(str, Enum):
+    """Quality tier of a source."""
+
+    PRIMARY = "Primary"  # Original documents, official statements, studies
+    WIRE_SERVICE = "Wire Service"  # Reuters, AP, AFP - highly credible
+    MAJOR_OUTLET = "Major Outlet"  # NYT, BBC, WSJ - established outlets
+    CREDIBLE = "Credible"  # Other established outlets with standards
+    UNKNOWN = "Unknown"  # Cannot assess or unfamiliar
+    QUESTIONABLE = "Questionable"  # Known unreliable sources
+
+
+class SourceAssessment(BaseModel):
+    """Assessment of a single source."""
+
+    domain: str = Field(
+        description="The domain of the source"
+    )
+    quality: SourceQuality = Field(
+        description="Quality tier of this source"
+    )
+    reasoning: str = Field(
+        description="Brief explanation of the quality assessment"
+    )
+
+
+class SourcingLLMOutput(BaseModel):
+    """Structured LLM output for sourcing analysis."""
+
+    sources_assessed: list[SourceAssessment] = Field(
+        default_factory=list,
+        description="Assessment of each unique source domain"
+    )
+    overall_quality_score: float = Field(
+        ge=0.0,
+        le=10.0,
+        description="Overall sourcing quality (0=excellent, 10=poor)"
+    )
+    has_primary_sources: bool = Field(
+        description="Whether primary sources (official docs, studies) are cited"
+    )
+    has_wire_services: bool = Field(
+        description="Whether wire services (Reuters, AP) are cited"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the assessment"
+    )
+    overall_assessment: str = Field(
+        description="Summary assessment of sourcing practices"
+    )
+
+
+class SourcingAnalysisResult(BaseModel):
+    """Complete sourcing analysis result."""
+
+    score: float = Field(
+        ge=0.0,
+        le=10.0,
+        description="MBFC-style score (0=excellent, 10=poor)"
+    )
+    avg_sources_per_article: float = Field(
+        ge=0.0,
+        description="Average number of sources cited per article"
+    )
+    total_sources_found: int = Field(
+        ge=0,
+        description="Total number of source links found"
+    )
+    unique_domains: int = Field(
+        ge=0,
+        description="Number of unique source domains"
+    )
+    has_hyperlinks: bool = Field(
+        description="Whether articles contain hyperlinks to sources"
+    )
+    source_assessments: list[SourceAssessment] = Field(
+        default_factory=list,
+        description="Individual source quality assessments"
+    )
+    has_primary_sources: bool = Field(
+        default=False,
+        description="Whether primary sources are cited"
+    )
+    has_wire_services: bool = Field(
+        default=False,
+        description="Whether wire services are cited"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the analysis"
+    )
+    reasoning: str = Field(
+        description="Explanation of the sourcing analysis"
+    )
