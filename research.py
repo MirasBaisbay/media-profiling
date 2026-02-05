@@ -110,6 +110,19 @@ For each analysis found:
 
 Include up to 3-5 most relevant and credible analyses."""
 
+    # Domains to exclude from search results
+    SEARCH_BLACKLIST = {
+        "facebook.com",
+        "twitter.com",
+        "x.com",
+        "instagram.com",
+        "tiktok.com",
+        "pinterest.com",
+        "linkedin.com",
+        "reddit.com",
+        "youtube.com",
+    }
+
     def __init__(
         self,
         model: str = "gpt-4o-mini",
@@ -149,37 +162,10 @@ Include up to 3-5 most relevant and credible analyses."""
             url: The outlet's URL
 
         Returns:
-            Human-readable name
+            Human-readable name derived from domain
         """
         domain = self._extract_domain(url)
-
-        # Common mappings
-        known_names = {
-            "nytimes.com": "New York Times",
-            "washingtonpost.com": "Washington Post",
-            "wsj.com": "Wall Street Journal",
-            "bbc.com": "BBC",
-            "cnn.com": "CNN",
-            "foxnews.com": "Fox News",
-            "msnbc.com": "MSNBC",
-            "infowars.com": "InfoWars",
-            "breitbart.com": "Breitbart",
-            "dailywire.com": "Daily Wire",
-            "theguardian.com": "The Guardian",
-            "reuters.com": "Reuters",
-            "apnews.com": "Associated Press",
-            "huffpost.com": "HuffPost",
-            "vox.com": "Vox",
-            "axios.com": "Axios",
-            "politico.com": "Politico",
-            "theatlantic.com": "The Atlantic",
-            "npr.org": "NPR",
-        }
-
-        if domain in known_names:
-            return known_names[domain]
-
-        # Generate from domain
+        # Generate name from domain (e.g., "nytimes.com" -> "Nytimes")
         name = domain.split(".")[0]
         return name.replace("-", " ").replace("_", " ").title()
 
@@ -195,14 +181,21 @@ Include up to 3-5 most relevant and credible analyses."""
             Combined search snippets
         """
         try:
-            results = list(self.search.text(query, max_results=max_results))
+            # Request more results to account for blacklist filtering
+            results = list(self.search.text(query, max_results=max_results + 5))
             if results:
                 snippets = []
                 for r in results:
+                    url = r.get("href", "")
+                    # Filter out blacklisted domains
+                    result_domain = self._extract_domain(url)
+                    if result_domain in self.SEARCH_BLACKLIST:
+                        continue
                     title = r.get("title", "")
                     body = r.get("body", "")
-                    url = r.get("href", "")
                     snippets.append(f"{title}: {body} (URL: {url})")
+                    if len(snippets) >= max_results:
+                        break
                 return "\n\n".join(snippets)
             return ""
         except Exception as e:
@@ -219,7 +212,7 @@ Include up to 3-5 most relevant and credible analyses."""
         Returns:
             HistoryLLMOutput with extracted history
         """
-        query = f'"{outlet_name}" founded history media news organization wikipedia'
+        query = f'"{outlet_name}" founded history about us media news organization'
         snippets = self._search(query)
 
         if not snippets:
