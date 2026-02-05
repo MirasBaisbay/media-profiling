@@ -804,3 +804,186 @@ class PseudoscienceAnalysisResult(BaseModel):
     reasoning: str = Field(
         description="Explanation of pseudoscience assessment"
     )
+
+
+# =============================================================================
+# Research Module Schemas
+# =============================================================================
+
+
+class HistoryLLMOutput(BaseModel):
+    """Structured LLM output for outlet history extraction."""
+
+    founding_year: Optional[int] = Field(
+        default=None,
+        description="Year the outlet was founded"
+    )
+    founder: Optional[str] = Field(
+        default=None,
+        description="Name of founder(s)"
+    )
+    original_name: Optional[str] = Field(
+        default=None,
+        description="Original name if different from current"
+    )
+    key_events: list[str] = Field(
+        default_factory=list,
+        description="Key events in the outlet's history"
+    )
+    summary: str = Field(
+        description="2-3 sentence history summary"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in extracted information"
+    )
+
+
+class OwnershipLLMOutput(BaseModel):
+    """Structured LLM output for ownership/funding extraction."""
+
+    owner: Optional[str] = Field(
+        default=None,
+        description="Current owner name"
+    )
+    parent_company: Optional[str] = Field(
+        default=None,
+        description="Parent company if applicable"
+    )
+    funding_model: Optional[str] = Field(
+        default=None,
+        description="Funding model: advertising, subscription, public, nonprofit, mixed"
+    )
+    headquarters: Optional[str] = Field(
+        default=None,
+        description="Headquarters location (city, country)"
+    )
+    notes: str = Field(
+        default="",
+        description="Additional notes about ownership/funding"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in extracted information"
+    )
+
+
+class ExternalAnalysisItem(BaseModel):
+    """A single external analysis/criticism of an outlet."""
+
+    source_name: str = Field(
+        description="Name of the source (e.g., 'Columbia Journalism Review')"
+    )
+    source_url: Optional[str] = Field(
+        default=None,
+        description="URL of the source if available"
+    )
+    summary: str = Field(
+        description="Brief summary of the analysis/criticism"
+    )
+    sentiment: str = Field(
+        description="Sentiment: positive, negative, neutral, or mixed"
+    )
+
+
+class ExternalAnalysisLLMOutput(BaseModel):
+    """Structured LLM output for external analysis extraction."""
+
+    analyses: list[ExternalAnalysisItem] = Field(
+        default_factory=list,
+        description="List of external analyses found"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in extracted information"
+    )
+
+
+class ComprehensiveReportData(BaseModel):
+    """Complete data for generating an MBFC-style report."""
+
+    # Target info
+    target_url: str = Field(description="URL of the outlet")
+    target_domain: str = Field(description="Domain name")
+    outlet_name: str = Field(description="Human-readable outlet name")
+
+    # Overall ratings
+    bias_label: str = Field(description="MBFC-style bias label")
+    bias_score: float = Field(
+        ge=-10.0, le=10.0,
+        description="Bias score (-10=far left, +10=far right)"
+    )
+    factuality_label: str = Field(description="Factuality rating label")
+    factuality_score: float = Field(
+        ge=0.0, le=10.0,
+        description="Factuality score (0=excellent, 10=very poor)"
+    )
+    credibility_label: str = Field(description="Overall credibility label")
+    credibility_score: float = Field(
+        ge=0.0, le=10.0,
+        description="Overall credibility score (0=excellent, 10=not credible)"
+    )
+
+    # Traffic and metadata
+    media_type: str = Field(description="Type of media outlet")
+    traffic_tier: str = Field(description="Traffic tier (HIGH/MEDIUM/LOW/MINIMAL)")
+    domain_age_years: Optional[float] = Field(
+        default=None,
+        description="Age of domain in years"
+    )
+
+    # Component analysis results
+    editorial_bias_result: Optional["EditorialBiasResult"] = Field(
+        default=None,
+        description="Editorial bias analysis result"
+    )
+    fact_check_result: Optional["FactCheckAnalysisResult"] = Field(
+        default=None,
+        description="Fact check search result"
+    )
+    sourcing_result: Optional["SourcingAnalysisResult"] = Field(
+        default=None,
+        description="Sourcing quality analysis result"
+    )
+    pseudoscience_result: Optional["PseudoscienceAnalysisResult"] = Field(
+        default=None,
+        description="Pseudoscience analysis result"
+    )
+
+    # Research results
+    history_summary: Optional[str] = Field(
+        default=None,
+        description="Brief history of the outlet"
+    )
+    founding_year: Optional[int] = Field(
+        default=None,
+        description="Year founded"
+    )
+    owner: Optional[str] = Field(
+        default=None,
+        description="Owner/parent company"
+    )
+    funding_model: Optional[str] = Field(
+        default=None,
+        description="Funding model"
+    )
+    headquarters: Optional[str] = Field(
+        default=None,
+        description="Headquarters location"
+    )
+
+    # External analyses
+    external_analyses: list[ExternalAnalysisItem] = Field(
+        default_factory=list,
+        description="External analyses from media watchdogs"
+    )
+
+    # Metadata
+    analysis_date: str = Field(description="Date of analysis")
+    articles_analyzed: int = Field(
+        ge=0,
+        description="Number of articles analyzed"
+    )

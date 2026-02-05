@@ -1,363 +1,792 @@
 """
-Research Module - Web Research for MBFC Reports
+Research Module - Web Research and Comprehensive Profiling for MBFC Reports
 
-This module gathers external context about media outlets through
-targeted web searches for:
-1. History (founding, key events, evolution)
-2. Ownership and funding information
-3. External analysis and criticism
-4. Existing MBFC entry (for validation)
+This module gathers external context about media outlets and orchestrates
+all analyzers to produce comprehensive MBFC-style reports.
 
-Uses DuckDuckGo search and LLM extraction for structured data.
+Components:
+1. MediaResearcher: Gathers history, ownership, and external analysis via web search
+2. MediaProfiler: Orchestrates all analyzers to produce comprehensive reports
+
+All LLM calls use LangChain's .with_structured_output() for type-safe responses.
 """
 
 import logging
-import json
 import re
-from typing import Dict, List, Optional, Any
+from datetime import date, datetime
+from typing import Optional
 from urllib.parse import urlparse
-from dataclasses import asdict
 
+from duckduckgo_search import DDGS
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage
-from langchain_community.tools import DuckDuckGoSearchRun
 
-from evidence import (
-    ExternalEvidence, HistoryInfo, OwnershipInfo,
-    ExternalAnalysis, ResearchResults
+from schemas import (
+    ComprehensiveReportData,
+    EditorialBiasResult,
+    ExternalAnalysisItem,
+    ExternalAnalysisLLMOutput,
+    FactCheckAnalysisResult,
+    HistoryLLMOutput,
+    OwnershipLLMOutput,
+    PseudoscienceAnalysisResult,
+    SourcingAnalysisResult,
+)
+
+from refactored_analyzers import (
+    EditorialBiasAnalyzer,
+    FactCheckSearcher,
+    MediaTypeAnalyzer,
+    OpinionAnalyzer,
+    PseudoscienceAnalyzer,
+    SourcingAnalyzer,
+    TrafficLongevityAnalyzer,
 )
 
 logger = logging.getLogger(__name__)
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-search_tool = DuckDuckGoSearchRun()
+
+
+# =============================================================================
+# LLM Configuration
+# =============================================================================
+
+
+def get_llm(model: str = "gpt-4o-mini", temperature: float = 0.0) -> ChatOpenAI:
+    """Get a configured LLM instance."""
+    return ChatOpenAI(model=model, temperature=temperature)
+
+
+# =============================================================================
+# MediaResearcher - Web Research with Structured Output
+# =============================================================================
 
 
 class MediaResearcher:
     """
     Gathers external context for comprehensive MBFC-style reports.
 
-    Performs 2-3 targeted web searches per outlet to gather:
+    Uses DuckDuckGo search + LLM with structured output to gather:
     - History and founding information
     - Ownership and funding details
     - External criticism and analysis
+
+    All LLM calls use .with_structured_output() for type-safe responses.
     """
 
-    def __init__(self):
-        self.search_tool = search_tool
-        self.llm = llm
+    HISTORY_PROMPT = """You are extracting history information about a media outlet from search results.
 
-    def research_outlet(
+Extract the following if available:
+- Founding year
+- Founder name(s)
+- Original name (if different from current)
+- Key events in the outlet's history (ownership changes, scandals, major milestones)
+
+Be conservative - only extract information that is clearly stated in the search results.
+If information is not found, leave fields as null."""
+
+    OWNERSHIP_PROMPT = """You are extracting ownership and funding information about a media outlet.
+
+Extract the following if available:
+- Current owner (person or entity)
+- Parent company (if applicable)
+- Funding model (advertising, subscription, public funding, nonprofit, mixed)
+- Headquarters location (city, country)
+
+Be conservative - only extract information that is clearly stated in the search results.
+If information is not found, leave fields as null."""
+
+    EXTERNAL_ANALYSIS_PROMPT = """You are extracting external analyses and criticism about a media outlet.
+
+Focus on:
+- Media watchdog reviews (MBFC, Ad Fontes, NewsGuard, etc.)
+- Academic studies
+- Journalism reviews (CJR, Nieman Lab, etc.)
+- Major controversies or notable praise
+
+For each analysis found:
+- Identify the source name
+- Extract URL if available
+- Summarize the key finding
+- Categorize sentiment as: positive, negative, neutral, or mixed
+
+Include up to 3-5 most relevant and credible analyses."""
+
+    def __init__(
         self,
-        url: str,
-        outlet_name: Optional[str] = None
-    ) -> ResearchResults:
+        model: str = "gpt-4o-mini",
+        temperature: float = 0.0,
+    ):
         """
-        Perform comprehensive research on a media outlet.
+        Initialize the MediaResearcher.
+
+        Args:
+            model: OpenAI model to use
+            temperature: LLM temperature (0 for deterministic)
+        """
+        self.history_llm = get_llm(model, temperature).with_structured_output(
+            HistoryLLMOutput
+        )
+        self.ownership_llm = get_llm(model, temperature).with_structured_output(
+            OwnershipLLMOutput
+        )
+        self.analysis_llm = get_llm(model, temperature).with_structured_output(
+            ExternalAnalysisLLMOutput
+        )
+        self.search = DDGS()
+
+    def _extract_domain(self, url: str) -> str:
+        """Extract the root domain from a URL."""
+        parsed = urlparse(url if url.startswith("http") else f"https://{url}")
+        domain = parsed.netloc or parsed.path
+        domain = re.sub(r"^www\.", "", domain)
+        domain = domain.split("/")[0]
+        return domain.lower()
+
+    def _extract_outlet_name(self, url: str) -> str:
+        """
+        Extract a human-readable outlet name from URL.
 
         Args:
             url: The outlet's URL
-            outlet_name: Optional name override (otherwise extracted from URL)
 
         Returns:
-            ResearchResults with all gathered information
+            Human-readable name
         """
-        # Extract outlet name from URL if not provided
-        if not outlet_name:
-            parsed = urlparse(url)
-            domain = parsed.netloc.replace('www.', '')
-            outlet_name = domain.split('.')[0].upper()
-            # Handle special cases
-            if 'bbc' in domain.lower():
-                outlet_name = 'BBC'
-            elif 'cnn' in domain.lower():
-                outlet_name = 'CNN'
-            elif 'nytimes' in domain.lower():
-                outlet_name = 'New York Times'
-            elif 'washingtonpost' in domain.lower():
-                outlet_name = 'Washington Post'
-            elif 'foxnews' in domain.lower():
-                outlet_name = 'Fox News'
+        domain = self._extract_domain(url)
 
-        logger.info(f"Researching outlet: {outlet_name} ({url})")
+        # Common mappings
+        known_names = {
+            "nytimes.com": "New York Times",
+            "washingtonpost.com": "Washington Post",
+            "wsj.com": "Wall Street Journal",
+            "bbc.com": "BBC",
+            "cnn.com": "CNN",
+            "foxnews.com": "Fox News",
+            "msnbc.com": "MSNBC",
+            "infowars.com": "InfoWars",
+            "breitbart.com": "Breitbart",
+            "dailywire.com": "Daily Wire",
+            "theguardian.com": "The Guardian",
+            "reuters.com": "Reuters",
+            "apnews.com": "Associated Press",
+            "huffpost.com": "HuffPost",
+            "vox.com": "Vox",
+            "axios.com": "Axios",
+            "politico.com": "Politico",
+            "theatlantic.com": "The Atlantic",
+            "npr.org": "NPR",
+        }
 
-        results = ResearchResults(
-            outlet_name=outlet_name,
-            outlet_url=url
+        if domain in known_names:
+            return known_names[domain]
+
+        # Generate from domain
+        name = domain.split(".")[0]
+        return name.replace("-", " ").replace("_", " ").title()
+
+    def _search(self, query: str, max_results: int = 5) -> str:
+        """
+        Perform a DuckDuckGo search and return combined snippets.
+
+        Args:
+            query: Search query
+            max_results: Maximum number of results
+
+        Returns:
+            Combined search snippets
+        """
+        try:
+            results = list(self.search.text(query, max_results=max_results))
+            if results:
+                snippets = []
+                for r in results:
+                    title = r.get("title", "")
+                    body = r.get("body", "")
+                    url = r.get("href", "")
+                    snippets.append(f"{title}: {body} (URL: {url})")
+                return "\n\n".join(snippets)
+            return ""
+        except Exception as e:
+            logger.warning(f"Search failed: {e}")
+            return ""
+
+    def research_history(self, outlet_name: str) -> HistoryLLMOutput:
+        """
+        Research outlet history and founding information.
+
+        Args:
+            outlet_name: Human-readable outlet name
+
+        Returns:
+            HistoryLLMOutput with extracted history
+        """
+        query = f'"{outlet_name}" founded history media news organization wikipedia'
+        snippets = self._search(query)
+
+        if not snippets:
+            return HistoryLLMOutput(
+                summary="No history information found.",
+                confidence=0.0
+            )
+
+        user_prompt = f"""Extract history information for "{outlet_name}" from these search results:
+
+SEARCH RESULTS:
+{snippets[:3000]}"""
+
+        try:
+            result: HistoryLLMOutput = self.history_llm.invoke(
+                [
+                    {"role": "system", "content": self.HISTORY_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+            return result
+        except Exception as e:
+            logger.error(f"History research failed: {e}")
+            return HistoryLLMOutput(
+                summary=f"History research failed: {str(e)}",
+                confidence=0.0
+            )
+
+    def research_ownership(self, outlet_name: str) -> OwnershipLLMOutput:
+        """
+        Research ownership and funding information.
+
+        Args:
+            outlet_name: Human-readable outlet name
+
+        Returns:
+            OwnershipLLMOutput with extracted ownership info
+        """
+        query = f'"{outlet_name}" ownership owner parent company funded by headquarters'
+        snippets = self._search(query)
+
+        if not snippets:
+            return OwnershipLLMOutput(
+                notes="No ownership information found.",
+                confidence=0.0
+            )
+
+        user_prompt = f"""Extract ownership and funding information for "{outlet_name}" from these search results:
+
+SEARCH RESULTS:
+{snippets[:3000]}"""
+
+        try:
+            result: OwnershipLLMOutput = self.ownership_llm.invoke(
+                [
+                    {"role": "system", "content": self.OWNERSHIP_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+            return result
+        except Exception as e:
+            logger.error(f"Ownership research failed: {e}")
+            return OwnershipLLMOutput(
+                notes=f"Ownership research failed: {str(e)}",
+                confidence=0.0
+            )
+
+    def research_external_analysis(self, outlet_name: str) -> ExternalAnalysisLLMOutput:
+        """
+        Research external analyses and criticism.
+
+        Args:
+            outlet_name: Human-readable outlet name
+
+        Returns:
+            ExternalAnalysisLLMOutput with external analyses
+        """
+        query = f'"{outlet_name}" media bias analysis criticism review fact check rating'
+        snippets = self._search(query, max_results=8)
+
+        if not snippets:
+            return ExternalAnalysisLLMOutput(
+                analyses=[],
+                confidence=0.0
+            )
+
+        user_prompt = f"""Extract external analyses and criticism for "{outlet_name}" from these search results:
+
+SEARCH RESULTS:
+{snippets[:4000]}"""
+
+        try:
+            result: ExternalAnalysisLLMOutput = self.analysis_llm.invoke(
+                [
+                    {"role": "system", "content": self.EXTERNAL_ANALYSIS_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+            return result
+        except Exception as e:
+            logger.error(f"External analysis research failed: {e}")
+            return ExternalAnalysisLLMOutput(
+                analyses=[],
+                confidence=0.0
+            )
+
+
+# =============================================================================
+# MediaProfiler - Comprehensive Analysis Orchestrator
+# =============================================================================
+
+
+class MediaProfiler:
+    """
+    Orchestrates all analyzers to produce comprehensive MBFC-style reports.
+
+    Combines results from:
+    - TrafficLongevityAnalyzer: Domain age and traffic tier
+    - MediaTypeAnalyzer: Media type classification
+    - OpinionAnalyzer: News vs Opinion classification
+    - EditorialBiasAnalyzer: Political bias detection
+    - FactCheckSearcher: Fact-checker search results
+    - SourcingAnalyzer: Source quality assessment
+    - PseudoscienceAnalyzer: Pseudoscience detection
+    - MediaResearcher: History, ownership, external analysis
+
+    Produces a ComprehensiveReportData object with all analysis results.
+    """
+
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        temperature: float = 0.0,
+    ):
+        """
+        Initialize all analyzers.
+
+        Args:
+            model: OpenAI model to use for all analyzers
+            temperature: LLM temperature (0 for deterministic)
+        """
+        self.traffic_analyzer = TrafficLongevityAnalyzer(model=model, temperature=temperature)
+        self.media_type_analyzer = MediaTypeAnalyzer(model=model, temperature=temperature)
+        self.opinion_analyzer = OpinionAnalyzer(model=model, temperature=temperature)
+        self.editorial_bias_analyzer = EditorialBiasAnalyzer(model=model, temperature=temperature)
+        self.fact_check_searcher = FactCheckSearcher(model=model, temperature=temperature)
+        self.sourcing_analyzer = SourcingAnalyzer(model=model, temperature=temperature)
+        self.pseudoscience_analyzer = PseudoscienceAnalyzer(model=model, temperature=temperature)
+        self.researcher = MediaResearcher(model=model, temperature=temperature)
+
+    def _extract_domain(self, url: str) -> str:
+        """Extract the root domain from a URL."""
+        parsed = urlparse(url if url.startswith("http") else f"https://{url}")
+        domain = parsed.netloc or parsed.path
+        domain = re.sub(r"^www\.", "", domain)
+        domain = domain.split("/")[0]
+        return domain.lower()
+
+    def _score_to_factuality_label(self, score: float) -> str:
+        """Convert factuality score to MBFC-style label."""
+        if score <= 2.0:
+            return "Very High"
+        elif score <= 4.0:
+            return "High"
+        elif score <= 6.0:
+            return "Mixed"
+        elif score <= 8.0:
+            return "Low"
+        else:
+            return "Very Low"
+
+    def _calculate_credibility_score(
+        self,
+        fact_check_score: float,
+        sourcing_score: float,
+        pseudoscience_score: float,
+    ) -> tuple[float, str]:
+        """
+        Calculate overall credibility score and label.
+
+        Args:
+            fact_check_score: Score from FactCheckSearcher (0-10)
+            sourcing_score: Score from SourcingAnalyzer (0-10)
+            pseudoscience_score: Score from PseudoscienceAnalyzer (0-10)
+
+        Returns:
+            Tuple of (credibility_score, credibility_label)
+        """
+        # Weighted average: fact checks 40%, sourcing 30%, pseudoscience 30%
+        credibility_score = (
+            fact_check_score * 0.4 +
+            sourcing_score * 0.3 +
+            pseudoscience_score * 0.3
         )
 
-        # Perform searches in sequence (to avoid rate limits)
-        try:
-            # 1. Search for history
-            history_info = self._search_history(outlet_name)
-            results.history = history_info
-            results.all_evidence.extend(history_info.sources)
-            results.search_queries_used.append(f"{outlet_name} founded history media")
+        if credibility_score <= 2.0:
+            label = "Very High Credibility"
+        elif credibility_score <= 4.0:
+            label = "High Credibility"
+        elif credibility_score <= 6.0:
+            label = "Medium Credibility"
+        elif credibility_score <= 8.0:
+            label = "Low Credibility"
+        else:
+            label = "Very Low Credibility"
 
-            # 2. Search for ownership
-            ownership_info = self._search_ownership(outlet_name)
-            results.ownership = ownership_info
-            results.all_evidence.extend(ownership_info.sources)
-            results.search_queries_used.append(f"{outlet_name} ownership funded by parent company")
+        return credibility_score, label
 
-            # 3. Search for external analysis
-            external = self._search_external_analysis(outlet_name)
-            results.external_analyses = external
-            for analysis in external:
-                results.all_evidence.append(ExternalEvidence(
-                    source_name=analysis.source_name,
-                    source_url=analysis.source_url,
-                    finding=analysis.summary,
-                    finding_type="analysis"
-                ))
-            results.search_queries_used.append(f"{outlet_name} bias analysis criticism")
+    def profile(
+        self,
+        url: str,
+        articles: list[dict[str, str]],
+        outlet_name: Optional[str] = None,
+    ) -> ComprehensiveReportData:
+        """
+        Perform comprehensive profiling of a media outlet.
 
-        except Exception as e:
-            logger.error(f"Research failed for {outlet_name}: {e}")
+        Args:
+            url: The outlet's URL
+            articles: List of article dicts with 'title' and 'text' keys
+            outlet_name: Optional human-readable name (auto-detected if not provided)
 
-        return results
+        Returns:
+            ComprehensiveReportData with all analysis results
+        """
+        domain = self._extract_domain(url)
+        outlet_name = outlet_name or self.researcher._extract_outlet_name(url)
 
-    def _search_history(self, outlet_name: str) -> HistoryInfo:
-        """Search for outlet history and founding information."""
-        query = f'"{outlet_name}" founded history media news organization'
+        logger.info(f"Profiling: {outlet_name} ({domain})")
 
-        try:
-            search_results = self.search_tool.run(query)
+        # 1. Traffic and metadata analysis
+        logger.info("  - Analyzing traffic and longevity...")
+        traffic_data = self.traffic_analyzer.analyze(url)
 
-            # Use LLM to extract structured history info
-            prompt = f"""
-Extract history information about the media outlet "{outlet_name}" from these search results.
+        logger.info("  - Classifying media type...")
+        media_type_result = self.media_type_analyzer.analyze(url)
 
-SEARCH RESULTS:
-{search_results[:3000]}
+        # 2. Content analysis (requires articles)
+        editorial_bias_result: Optional[EditorialBiasResult] = None
+        sourcing_result: Optional[SourcingAnalysisResult] = None
+        pseudoscience_result: Optional[PseudoscienceAnalysisResult] = None
 
-Return a JSON object with:
-{{
-    "founding_year": <number or null>,
-    "founder": "<name or null>",
-    "original_name": "<original name if different, or null>",
-    "key_events": ["<event 1>", "<event 2>", ...],
-    "summary": "<2-3 sentence history summary>"
-}}
-
-Return ONLY the JSON object, nothing else.
-"""
-            response = self.llm.invoke([HumanMessage(content=prompt)])
-            content = response.content.strip()
-            content = content.replace('```json', '').replace('```', '').strip()
-            data = json.loads(content)
-
-            history = HistoryInfo(
-                founding_year=data.get("founding_year"),
-                founder=data.get("founder"),
-                original_name=data.get("original_name"),
-                key_events=data.get("key_events", [])
+        if articles:
+            logger.info(f"  - Analyzing {len(articles)} articles for bias...")
+            editorial_bias_result = self.editorial_bias_analyzer.analyze(
+                articles, url, outlet_name
             )
 
-            # Add source evidence
-            history.sources.append(ExternalEvidence(
-                source_name="Web Search",
-                source_url="",
-                finding=data.get("summary", ""),
-                finding_type="history",
-                reliability="medium"
-            ))
+            logger.info("  - Analyzing sourcing quality...")
+            sourcing_result = self.sourcing_analyzer.analyze(articles)
 
-            return history
-
-        except Exception as e:
-            logger.warning(f"History search failed: {e}")
-            return HistoryInfo()
-
-    def _search_ownership(self, outlet_name: str) -> OwnershipInfo:
-        """Search for ownership and funding information."""
-        query = f'"{outlet_name}" ownership funded by parent company headquarters'
-
-        try:
-            search_results = self.search_tool.run(query)
-
-            # Use LLM to extract structured ownership info
-            prompt = f"""
-Extract ownership and funding information about "{outlet_name}" from these search results.
-
-SEARCH RESULTS:
-{search_results[:3000]}
-
-Return a JSON object with:
-{{
-    "owner": "<owner name or null>",
-    "parent_company": "<parent company or null>",
-    "funding_model": "<advertising/subscription/public/nonprofit/mixed or null>",
-    "headquarters": "<city, country or null>",
-    "notes": "<any relevant notes about ownership/funding>"
-}}
-
-Return ONLY the JSON object, nothing else.
-"""
-            response = self.llm.invoke([HumanMessage(content=prompt)])
-            content = response.content.strip()
-            content = content.replace('```json', '').replace('```', '').strip()
-            data = json.loads(content)
-
-            ownership = OwnershipInfo(
-                owner=data.get("owner"),
-                parent_company=data.get("parent_company"),
-                funding_model=data.get("funding_model"),
-                headquarters=data.get("headquarters"),
-                transparency_notes=data.get("notes", "")
+            logger.info("  - Checking for pseudoscience...")
+            pseudoscience_result = self.pseudoscience_analyzer.analyze(
+                articles, url, outlet_name
             )
 
-            # Add source evidence
-            ownership.sources.append(ExternalEvidence(
-                source_name="Web Search",
-                source_url="",
-                finding=f"Owner: {ownership.owner}, Funding: {ownership.funding_model}",
-                finding_type="ownership",
-                reliability="medium"
-            ))
+        # 3. Fact check search
+        logger.info("  - Searching fact-checkers...")
+        fact_check_result = self.fact_check_searcher.analyze(url, outlet_name)
 
-            return ownership
+        # 4. External research
+        logger.info("  - Researching history...")
+        history = self.researcher.research_history(outlet_name)
 
-        except Exception as e:
-            logger.warning(f"Ownership search failed: {e}")
-            return OwnershipInfo()
+        logger.info("  - Researching ownership...")
+        ownership = self.researcher.research_ownership(outlet_name)
 
-    def _search_external_analysis(self, outlet_name: str) -> List[ExternalAnalysis]:
-        """Search for external analysis and criticism of the outlet."""
-        query = f'"{outlet_name}" media bias analysis criticism review'
+        logger.info("  - Gathering external analyses...")
+        external_analyses = self.researcher.research_external_analysis(outlet_name)
 
-        analyses = []
+        # 5. Calculate overall scores
+        bias_score = editorial_bias_result.bias_score if editorial_bias_result else 0.0
+        bias_label = editorial_bias_result.mbfc_label if editorial_bias_result else "Center"
 
-        try:
-            search_results = self.search_tool.run(query)
+        fact_check_score = fact_check_result.score
+        sourcing_score = sourcing_result.score if sourcing_result else 5.0
+        pseudoscience_score = pseudoscience_result.score if pseudoscience_result else 5.0
 
-            # Use LLM to extract structured analysis
-            prompt = f"""
-Extract external analyses and criticism about "{outlet_name}" from these search results.
+        # Factuality is average of fact check and sourcing
+        factuality_score = (fact_check_score + sourcing_score) / 2
+        factuality_label = self._score_to_factuality_label(factuality_score)
 
-SEARCH RESULTS:
-{search_results[:3000]}
+        # Credibility combines all factual indicators
+        credibility_score, credibility_label = self._calculate_credibility_score(
+            fact_check_score, sourcing_score, pseudoscience_score
+        )
 
-Return a JSON object with:
-{{
-    "analyses": [
-        {{
-            "source_name": "<source name>",
-            "source_url": "<url if available>",
-            "summary": "<brief summary of analysis/criticism>",
-            "sentiment": "positive" | "negative" | "neutral" | "mixed"
-        }},
-        ...
-    ]
-}}
+        # 6. Build comprehensive report
+        report = ComprehensiveReportData(
+            # Target info
+            target_url=url,
+            target_domain=domain,
+            outlet_name=outlet_name,
 
-Include up to 3 most relevant analyses. Focus on media watchdogs, journalism reviews, and academic sources.
-Return ONLY the JSON object, nothing else.
-"""
-            response = self.llm.invoke([HumanMessage(content=prompt)])
-            content = response.content.strip()
-            content = content.replace('```json', '').replace('```', '').strip()
-            data = json.loads(content)
+            # Overall ratings
+            bias_label=bias_label,
+            bias_score=bias_score,
+            factuality_label=factuality_label,
+            factuality_score=factuality_score,
+            credibility_label=credibility_label,
+            credibility_score=credibility_score,
 
-            for item in data.get("analyses", []):
-                analyses.append(ExternalAnalysis(
-                    source_name=item.get("source_name", "Unknown"),
-                    source_url=item.get("source_url", ""),
-                    summary=item.get("summary", ""),
-                    sentiment=item.get("sentiment", "neutral")
-                ))
+            # Traffic and metadata
+            media_type=media_type_result.media_type.value,
+            traffic_tier=traffic_data.traffic_tier.value,
+            domain_age_years=traffic_data.age_years,
 
-        except Exception as e:
-            logger.warning(f"External analysis search failed: {e}")
+            # Component analysis results
+            editorial_bias_result=editorial_bias_result,
+            fact_check_result=fact_check_result,
+            sourcing_result=sourcing_result,
+            pseudoscience_result=pseudoscience_result,
 
-        return analyses
+            # Research results
+            history_summary=history.summary,
+            founding_year=history.founding_year,
+            owner=ownership.owner or ownership.parent_company,
+            funding_model=ownership.funding_model,
+            headquarters=ownership.headquarters,
 
-    def _check_existing_mbfc(self, outlet_name: str) -> Optional[Dict]:
-        """Check if MBFC already has an entry for this outlet."""
-        query = f'site:mediabiasfactcheck.com "{outlet_name}"'
+            # External analyses
+            external_analyses=external_analyses.analyses,
 
-        try:
-            search_results = self.search_tool.run(query)
+            # Metadata
+            analysis_date=datetime.now().strftime("%Y-%m-%d"),
+            articles_analyzed=len(articles),
+        )
 
-            if 'mediabiasfactcheck.com' in search_results.lower():
-                # Extract URL if present
-                urls = re.findall(r'https://mediabiasfactcheck\.com/[^\s]+', search_results)
-                if urls:
-                    return {
-                        "exists": True,
-                        "url": urls[0],
-                        "note": "MBFC entry found - can be used for validation"
-                    }
+        logger.info(f"  - Profiling complete for {outlet_name}")
+        return report
 
-            return {"exists": False}
+    def generate_report_text(self, report: ComprehensiveReportData) -> str:
+        """
+        Generate a human-readable MBFC-style report.
 
-        except Exception as e:
-            logger.warning(f"MBFC check failed: {e}")
-            return {"exists": False}
+        Args:
+            report: ComprehensiveReportData from profile()
+
+        Returns:
+            Formatted text report
+        """
+        lines = []
+
+        # Header
+        lines.append("=" * 70)
+        lines.append(f"MEDIA BIAS/FACT CHECK REPORT: {report.outlet_name.upper()}")
+        lines.append("=" * 70)
+        lines.append(f"URL: {report.target_url}")
+        lines.append(f"Analysis Date: {report.analysis_date}")
+        lines.append("")
+
+        # Quick Summary
+        lines.append("QUICK SUMMARY")
+        lines.append("-" * 40)
+        lines.append(f"  Bias Rating:        {report.bias_label}")
+        lines.append(f"  Factuality Rating:  {report.factuality_label}")
+        lines.append(f"  Credibility:        {report.credibility_label}")
+        lines.append(f"  Media Type:         {report.media_type}")
+        lines.append(f"  Traffic:            {report.traffic_tier}")
+        if report.domain_age_years:
+            lines.append(f"  Domain Age:         {report.domain_age_years:.1f} years")
+        lines.append("")
+
+        # History
+        lines.append("HISTORY")
+        lines.append("-" * 40)
+        if report.founding_year:
+            lines.append(f"  Founded: {report.founding_year}")
+        if report.owner:
+            lines.append(f"  Owner: {report.owner}")
+        if report.funding_model:
+            lines.append(f"  Funding: {report.funding_model}")
+        if report.headquarters:
+            lines.append(f"  Headquarters: {report.headquarters}")
+        if report.history_summary:
+            lines.append(f"\n  {report.history_summary}")
+        lines.append("")
+
+        # Bias Analysis
+        lines.append("BIAS ANALYSIS")
+        lines.append("-" * 40)
+        lines.append(f"  Overall Bias: {report.bias_label} (score: {report.bias_score:+.1f})")
+        if report.editorial_bias_result:
+            eb = report.editorial_bias_result
+            if eb.uses_loaded_language:
+                lines.append(f"  Uses Loaded Language: Yes")
+                if eb.loaded_language_examples:
+                    examples = ", ".join(eb.loaded_language_examples[:3])
+                    lines.append(f"    Examples: {examples}")
+            if eb.policy_positions:
+                lines.append("  Policy Positions Detected:")
+                for pos in eb.policy_positions[:3]:
+                    lines.append(f"    - {pos.domain.value}: {pos.position}")
+            lines.append(f"\n  Analysis: {eb.reasoning}")
+        lines.append("")
+
+        # Factuality Analysis
+        lines.append("FACTUALITY ANALYSIS")
+        lines.append("-" * 40)
+        lines.append(f"  Factuality Rating: {report.factuality_label} (score: {report.factuality_score:.1f}/10)")
+
+        if report.fact_check_result:
+            fc = report.fact_check_result
+            lines.append(f"\n  Fact Check Search Results:")
+            lines.append(f"    Total Fact Checks Found: {fc.total_checks_count}")
+            lines.append(f"    Failed Fact Checks: {fc.failed_checks_count}")
+            if fc.findings:
+                lines.append("    Recent Findings:")
+                for finding in fc.findings[:3]:
+                    lines.append(f"      - [{finding.verdict.value}] {finding.claim[:60]}...")
+
+        if report.sourcing_result:
+            sr = report.sourcing_result
+            lines.append(f"\n  Sourcing Quality:")
+            lines.append(f"    Score: {sr.score:.1f}/10")
+            lines.append(f"    Unique Sources: {sr.unique_domains}")
+            lines.append(f"    Has Primary Sources: {'Yes' if sr.has_primary_sources else 'No'}")
+            lines.append(f"    Has Wire Services: {'Yes' if sr.has_wire_services else 'No'}")
+        lines.append("")
+
+        # Pseudoscience
+        if report.pseudoscience_result:
+            lines.append("PSEUDOSCIENCE CHECK")
+            lines.append("-" * 40)
+            ps = report.pseudoscience_result
+            lines.append(f"  Promotes Pseudoscience: {'Yes' if ps.promotes_pseudoscience else 'No'}")
+            lines.append(f"  Respects Scientific Consensus: {'Yes' if ps.respects_scientific_consensus else 'No'}")
+            if ps.categories_found:
+                cats = ", ".join(c.value for c in ps.categories_found[:3])
+                lines.append(f"  Categories Found: {cats}")
+            lines.append(f"\n  Assessment: {ps.reasoning}")
+            lines.append("")
+
+        # External Analyses
+        if report.external_analyses:
+            lines.append("EXTERNAL ANALYSES")
+            lines.append("-" * 40)
+            for analysis in report.external_analyses[:3]:
+                sentiment_emoji = {
+                    "positive": "+",
+                    "negative": "-",
+                    "neutral": "~",
+                    "mixed": "?"
+                }.get(analysis.sentiment, "?")
+                lines.append(f"  [{sentiment_emoji}] {analysis.source_name}")
+                lines.append(f"      {analysis.summary}")
+            lines.append("")
+
+        # Footer
+        lines.append("=" * 70)
+        lines.append(f"Articles Analyzed: {report.articles_analyzed}")
+        lines.append("Generated by Media Profiling System")
+        lines.append("=" * 70)
+
+        return "\n".join(lines)
 
 
-def research_node(state: Dict) -> Dict:
+# =============================================================================
+# Convenience Functions
+# =============================================================================
+
+
+def research_outlet(url: str, outlet_name: Optional[str] = None) -> dict:
     """
-    LangGraph node for research phase.
+    Convenience function to research an outlet without full profiling.
 
-    Gathers external context about the media outlet.
+    Args:
+        url: The outlet's URL
+        outlet_name: Optional human-readable name
+
+    Returns:
+        Dict with history, ownership, and external analyses
     """
     researcher = MediaResearcher()
+    outlet_name = outlet_name or researcher._extract_outlet_name(url)
 
-    # Extract outlet name from scraped metadata if available
-    outlet_name = None
-    if state.get("site_metadata"):
-        # Try to get name from site metadata
-        pass
-
-    results = researcher.research_outlet(
-        url=state["target_url"],
-        outlet_name=outlet_name
-    )
+    history = researcher.research_history(outlet_name)
+    ownership = researcher.research_ownership(outlet_name)
+    external = researcher.research_external_analysis(outlet_name)
 
     return {
-        "research_results": asdict(results)
+        "outlet_name": outlet_name,
+        "history": history.model_dump(),
+        "ownership": ownership.model_dump(),
+        "external_analyses": external.model_dump(),
     }
 
 
+def profile_outlet(
+    url: str,
+    articles: list[dict[str, str]],
+    outlet_name: Optional[str] = None,
+) -> ComprehensiveReportData:
+    """
+    Convenience function to profile a media outlet.
+
+    Args:
+        url: The outlet's URL
+        articles: List of article dicts with 'title' and 'text' keys
+        outlet_name: Optional human-readable name
+
+    Returns:
+        ComprehensiveReportData with all analysis results
+    """
+    profiler = MediaProfiler()
+    return profiler.profile(url, articles, outlet_name)
+
+
 # =============================================================================
-# EXAMPLE USAGE
+# CLI / Testing
 # =============================================================================
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    import sys
 
-    researcher = MediaResearcher()
+    # Configure logging for demo
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
 
-    # Test with BBC
-    results = researcher.research_outlet("https://www.bbc.com", "BBC")
+    print("=" * 70)
+    print("MEDIA PROFILER - DEMO")
+    print("=" * 70)
 
-    print("\n" + "=" * 60)
-    print("RESEARCH RESULTS")
-    print("=" * 60)
-    print(f"\nOutlet: {results.outlet_name}")
-    print(f"URL: {results.outlet_url}")
+    # Test with sample articles
+    sample_articles = [
+        {
+            "title": "Climate Change Policy Faces Opposition",
+            "text": """
+            The administration's new climate policy has drawn sharp criticism from
+            industry groups who claim it will devastate the economy. Environmental
+            advocates, however, argue the measures don't go far enough to address
+            the urgent threat of global warming. According to a new report from the
+            IPCC, immediate action is needed to prevent catastrophic warming.
+            Critics on the right have called the policy "radical" and "job-killing,"
+            while progressive groups say it represents a step in the right direction.
+            The EPA cited studies from nature.gov and the Department of Energy
+            in defending the new regulations.
+            """
+        },
+        {
+            "title": "Healthcare Reform Debate Intensifies",
+            "text": """
+            As healthcare costs continue to rise, lawmakers are divided on solutions.
+            Progressive members of Congress are pushing for expanded Medicare coverage,
+            while conservatives argue for market-based reforms. A new study from the
+            Kaiser Family Foundation found that healthcare spending now accounts for
+            nearly 20% of GDP. The American Medical Association has expressed concerns
+            about both approaches, citing potential impacts on physician autonomy.
+            """
+        },
+    ]
 
-    print("\n--- HISTORY ---")
-    if results.history.founding_year:
-        print(f"Founded: {results.history.founding_year}")
-    if results.history.founder:
-        print(f"Founder: {results.history.founder}")
-    if results.history.key_events:
-        print("Key Events:")
-        for event in results.history.key_events[:3]:
-            print(f"  - {event}")
+    # Test with a domain
+    test_url = "https://www.bbc.com"
 
-    print("\n--- OWNERSHIP ---")
-    if results.ownership.owner:
-        print(f"Owner: {results.ownership.owner}")
-    if results.ownership.funding_model:
-        print(f"Funding: {results.ownership.funding_model}")
-    if results.ownership.headquarters:
-        print(f"HQ: {results.ownership.headquarters}")
+    print(f"\nProfiling: {test_url}")
+    print("-" * 50)
 
-    print("\n--- EXTERNAL ANALYSIS ---")
-    for analysis in results.external_analyses:
-        print(f"  [{analysis.sentiment}] {analysis.source_name}: {analysis.summary[:100]}...")
+    profiler = MediaProfiler()
+    report = profiler.profile(test_url, sample_articles)
 
-    print(f"\nSearches performed: {len(results.search_queries_used)}")
-    print(f"Evidence items collected: {len(results.all_evidence)}")
+    # Generate and print text report
+    report_text = profiler.generate_report_text(report)
+    print("\n" + report_text)
+
+    print("\n" + "=" * 70)
+    print("DEMO COMPLETE")
+    print("=" * 70)
