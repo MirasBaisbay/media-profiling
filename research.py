@@ -72,9 +72,10 @@ class MediaResearcher:
     All LLM calls use .with_structured_output() for type-safe responses.
     """
 
-    HISTORY_PROMPT = """You are extracting history information about a media outlet from search results.
+    HISTORY_PROMPT = """You are extracting history and identity information about a media outlet from search results.
 
 Extract the following if available:
+- Official Name: The full, proper name of the organization (e.g., "The New York Times" instead of "nytimes", "The Associated Press" instead of "apnews", "Wall Street Journal" instead of "wsj")
 - Founding year
 - Founder name(s)
 - Original name (if different from current)
@@ -485,6 +486,11 @@ class MediaProfiler:
         # 4. External research
         logger.info("  - Researching history...")
         history = self.researcher.research_history(outlet_name)
+
+        # Update outlet_name if LLM found the official name
+        if history.official_name:
+            logger.info(f"  - Updating outlet name from '{outlet_name}' to '{history.official_name}'")
+            outlet_name = history.official_name
 
         logger.info("  - Researching ownership...")
         ownership = self.researcher.research_ownership(outlet_name)

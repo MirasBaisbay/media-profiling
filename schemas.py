@@ -814,6 +814,10 @@ class PseudoscienceAnalysisResult(BaseModel):
 class HistoryLLMOutput(BaseModel):
     """Structured LLM output for outlet history extraction."""
 
+    official_name: Optional[str] = Field(
+        default=None,
+        description="The proper, official name of the organization (e.g., 'The Associated Press' instead of 'apnews', 'Wall Street Journal' instead of 'wsj')"
+    )
     founding_year: Optional[int] = Field(
         default=None,
         description="Year the outlet was founded"
