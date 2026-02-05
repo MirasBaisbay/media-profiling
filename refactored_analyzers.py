@@ -498,9 +498,9 @@ Look for indicators like:
 
             return None, False, "No creation date in WHOIS response"
 
-        except whois.parser.PywhoisError as e:
-            # Specific WHOIS parsing error
-            error_msg = f"WHOIS parsing error: {str(e)}"
+        except AttributeError as e:
+            # Handle cases where WHOIS response is malformed
+            error_msg = f"WHOIS attribute error: {str(e)}"
             logger.warning(f"{error_msg} for {domain}")
             return None, False, error_msg
 
