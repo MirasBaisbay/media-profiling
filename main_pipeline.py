@@ -62,7 +62,7 @@ def analyze_site(url: str, force_refresh: bool = False):
 
     # Convert Article objects to dicts for the profiler
     articles_data = [
-        {"title": a.title, "text": a.text} 
+        {"title": a.title, "text": a.text, "url": a.url}
         for a in articles_obj
     ]
 

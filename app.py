@@ -77,7 +77,7 @@ def run_analysis(url: str, force_refresh: bool = False):
         st.error("No articles found. The site may be blocking requests.")
         return None, None
 
-    articles_data = [{"title": a.title, "text": a.text} for a in articles_obj]
+    articles_data = [{"title": a.title, "text": a.text, "url": a.url} for a in articles_obj]
     progress.progress(20, text=f"Scraped {len(articles_data)} articles")
 
     # 2. Profile
@@ -210,9 +210,21 @@ if "report_data" in st.session_state and st.session_state.get("report_data"):
                     domain_name = pp.get("domain", "—")
                     leaning = pp.get("leaning", "—")
                     indicators = pp.get("indicators", [])
+                    source_articles = pp.get("source_articles", [])
                     with st.expander(f"**{domain_name}** — {leaning}"):
                         for ind in indicators:
                             st.markdown(f"- {ind}")
+                        if source_articles:
+                            st.caption("**Sources:** " + " | ".join(source_articles))
+
+            ideology = eb.get("ideology_summary", "")
+            economy = eb.get("economy_summary", "")
+            if ideology or economy:
+                st.markdown("### Ideology & Economy")
+                if ideology:
+                    st.markdown(f"**Ideology:** {ideology}")
+                if economy:
+                    st.markdown(f"**Economy:** {economy}")
 
             st.markdown("### Reasoning")
             st.info(eb.get("reasoning", "—"))

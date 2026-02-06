@@ -1629,7 +1629,21 @@ You MUST extract policy positions even when the outlet takes a neutral/balanced 
 - If an article discusses climate change factually without taking sides, output a PolicyPosition with domain="Environmental Policy", leaning="Center", and indicators like "Reports factually on climate science without advocacy."
 - If an article covers immigration policy neutrally, output a PolicyPosition with domain="Immigration", leaning="Center", and indicators describing the balanced framing.
 - Do NOT return an empty list for policy_positions unless the articles are entirely devoid of political or social topics (e.g., only sports scores or recipes).
-- For each major topic covered in the articles, create a PolicyPosition documenting the outlet's stance (which may be Center/balanced)."""
+- For each major topic covered in the articles, create a PolicyPosition documenting the outlet's stance (which may be Center/balanced).
+
+## CRITICAL: CITE SOURCE ARTICLES
+For each PolicyPosition, you MUST populate the 'source_articles' field with the article identifiers (e.g., "Article 1: [title]") where the evidence was found.
+- Every indicator MUST be traceable to a specific article.
+- Use the article number and title as shown in the input (e.g., "Article 3: Russia warns of consequences after NATO expansion").
+
+## CRITICAL: BE EXPLICIT AND DIRECT
+Do NOT use vague descriptions. State the outlet's positions directly:
+- BAD: "The outlet appears to have some progressive leanings on social issues."
+- GOOD: "The outlet advocates for expanded LGBTQ+ protections and frames abortion restrictions as threats to women's rights (Article 2: 'Supreme Court ruling threatens reproductive freedom')."
+- BAD: "Economic coverage tends to favor certain perspectives."
+- GOOD: "The outlet supports higher taxes on the wealthy, frames income inequality as a crisis, and advocates for stronger union protections (Article 5: 'Workers deserve a living wage, unions say')."
+When the outlet is centrist, still be explicit:
+- GOOD: "The outlet presents both pro-business and pro-labor arguments without taking sides, quoting economists from both perspectives (Article 1: 'Fed rate decision splits analysts').\""""
 
     def __init__(
         self,
@@ -1684,19 +1698,22 @@ You MUST extract policy positions even when the outlet takes a neutral/balanced 
         articles_text = []
         for i, article in enumerate(articles, 1):
             title = article.get("title", "Untitled")
+            url = article.get("url", "")
             text = article.get("text", "")[:2000]  # Limit text length
-            articles_text.append(f"ARTICLE {i}:\nTitle: {title}\nText: {text}\n")
+            url_line = f"\nURL: {url}" if url else ""
+            articles_text.append(f"ARTICLE {i}:\nTitle: {title}{url_line}\nText: {text}\n")
 
         combined_text = "\n---\n".join(articles_text)
 
-        user_prompt = f"""Analyze the following articles for editorial/political bias. 
+        user_prompt = f"""Analyze the following articles for editorial/political bias.
 IMPORTANT: If the articles are not in English, translate their core meaning to English internally before analyzing.
+IMPORTANT: For each policy position, cite the specific article(s) where you found the evidence using the format "Article N: [Title]".
 
 {combined_text}
 Assess:
 1. Overall political leaning (score from -10 to +10)
-2. Positions on specific policy domains if detectable
-3. Use of loaded language (with examples)
+2. Positions on specific policy domains if detectable — cite source articles for each
+3. Use of loaded language (with examples and source article references)
 4. Any story selection bias patterns"""
 
         try:
@@ -1772,6 +1789,8 @@ Assess:
             uses_loaded_language=llm_output.uses_loaded_language,
             loaded_language_examples=llm_output.loaded_language_examples,
             story_selection_bias=llm_output.story_selection_bias,
+            ideology_summary=llm_output.ideology_summary,
+            economy_summary=llm_output.economy_summary,
             articles_analyzed=len(articles),
             confidence=llm_output.confidence,
             reasoning=llm_output.reasoning,

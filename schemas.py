@@ -574,6 +574,10 @@ class PolicyPosition(BaseModel):
         default_factory=list,
         description="Specific indicators or quotes showing this position"
     )
+    source_articles: list[str] = Field(
+        default_factory=list,
+        description="Titles of the articles where this evidence was found (e.g., 'Article 1: Title Here')"
+    )
     confidence: float = Field(
         ge=0.0,
         le=1.0,
@@ -601,11 +605,19 @@ class EditorialBiasLLMOutput(BaseModel):
     )
     loaded_language_examples: list[str] = Field(
         default_factory=list,
-        description="Examples of loaded language found"
+        description="Examples of loaded language found, with article reference (e.g., 'regime change (Article 3: Title)')"
     )
     story_selection_bias: Optional[str] = Field(
         default=None,
         description="Notes on biased story selection patterns if detected"
+    )
+    ideology_summary: str = Field(
+        default="",
+        description="2-3 sentence direct summary of the outlet's ideological position (e.g., 'The outlet advocates for progressive policies including expanded healthcare and environmental regulation.')"
+    )
+    economy_summary: str = Field(
+        default="",
+        description="1-2 sentence direct summary of the outlet's economic stance (e.g., 'Economically, the outlet supports free-market capitalism with minimal government intervention.')"
     )
     confidence: float = Field(
         ge=0.0,
@@ -653,6 +665,14 @@ class EditorialBiasResult(BaseModel):
     story_selection_bias: Optional[str] = Field(
         default=None,
         description="Notes on story selection bias"
+    )
+    ideology_summary: str = Field(
+        default="",
+        description="Direct summary of the outlet's ideological position"
+    )
+    economy_summary: str = Field(
+        default="",
+        description="Direct summary of the outlet's economic stance"
     )
     articles_analyzed: int = Field(
         ge=0,
