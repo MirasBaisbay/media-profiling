@@ -168,7 +168,11 @@ Include up to 3-5 most relevant and credible analyses."""
         domain = self._extract_domain(url)
         # Generate name from domain (e.g., "nytimes.com" -> "Nytimes")
         name = domain.split(".")[0]
-        return name.replace("-", " ").replace("_", " ").title()
+        name = name.replace("-", " ").replace("_", " ")
+        # Short names (<=4 chars) are likely acronyms — uppercase them (bbc -> BBC, cnn -> CNN, npr -> NPR)
+        if len(name) <= 4:
+            return name.upper()
+        return name.title()
 
     def _search(self, query: str, max_results: int = 5) -> str:
         """
@@ -203,26 +207,42 @@ Include up to 3-5 most relevant and credible analyses."""
             logger.warning(f"Search failed: {e}")
             return ""
 
-    def research_history(self, outlet_name: str) -> HistoryLLMOutput:
+    def research_history(self, outlet_name: str, domain: str = "") -> HistoryLLMOutput:
         """
         Research outlet history and founding information.
 
-        First tries to find "about us" pages from the outlet itself,
-        then falls back to Wikipedia if no results found.
+        Tries multiple search strategies for robust results:
+        1. Outlet name + domain for disambiguation
+        2. About us / Wikipedia fallbacks
 
         Args:
             outlet_name: Human-readable outlet name
+            domain: Optional domain for disambiguation (e.g., "bbc.com")
 
         Returns:
             HistoryLLMOutput with extracted history
         """
+        # Build search terms — include domain for better disambiguation
+        domain_hint = f" site:{domain}" if domain else ""
+        name_variants = f'"{outlet_name}"'
+        if domain:
+            # Include domain name without TLD as an alternative match
+            domain_base = domain.split(".")[0]
+            if domain_base.lower() != outlet_name.lower():
+                name_variants = f'"{outlet_name}" OR "{domain_base}"'
+
         # First try: about us pages from the outlet itself
-        query = f'"{outlet_name}" about us founded history media news organization'
+        query = f'{name_variants} about us founded history media news organization'
         snippets = self._search(query)
 
         # Fallback to Wikipedia if no results
         if not snippets:
-            query = f'"{outlet_name}" wikipedia founded history media news organization'
+            query = f'{name_variants} wikipedia founded history media news organization'
+            snippets = self._search(query)
+
+        # Last resort: broader search with domain
+        if not snippets and domain:
+            query = f'{domain} history founded owner media'
             snippets = self._search(query)
 
         if not snippets:
@@ -251,18 +271,24 @@ SEARCH RESULTS:
                 confidence=0.0
             )
 
-    def research_ownership(self, outlet_name: str) -> OwnershipLLMOutput:
+    def research_ownership(self, outlet_name: str, domain: str = "") -> OwnershipLLMOutput:
         """
         Research ownership and funding information.
 
         Args:
             outlet_name: Human-readable outlet name
+            domain: Optional domain for disambiguation
 
         Returns:
             OwnershipLLMOutput with extracted ownership info
         """
         query = f'"{outlet_name}" ownership owner parent company funded by headquarters'
         snippets = self._search(query)
+
+        # Fallback: include domain for broader search
+        if not snippets and domain:
+            query = f'{domain} ownership owner parent company funded by headquarters'
+            snippets = self._search(query)
 
         if not snippets:
             return OwnershipLLMOutput(
@@ -290,18 +316,24 @@ SEARCH RESULTS:
                 confidence=0.0
             )
 
-    def research_external_analysis(self, outlet_name: str) -> ExternalAnalysisLLMOutput:
+    def research_external_analysis(self, outlet_name: str, domain: str = "") -> ExternalAnalysisLLMOutput:
         """
         Research external analyses and criticism.
 
         Args:
             outlet_name: Human-readable outlet name
+            domain: Optional domain for disambiguation
 
         Returns:
             ExternalAnalysisLLMOutput with external analyses
         """
         query = f'"{outlet_name}" media bias analysis criticism review fact check rating'
         snippets = self._search(query, max_results=8)
+
+        # Fallback: include domain
+        if not snippets and domain:
+            query = f'{domain} media bias analysis criticism review fact check rating'
+            snippets = self._search(query, max_results=8)
 
         if not snippets:
             return ExternalAnalysisLLMOutput(
@@ -485,7 +517,7 @@ class MediaProfiler:
 
         # 4. External research
         logger.info("  - Researching history...")
-        history = self.researcher.research_history(outlet_name)
+        history = self.researcher.research_history(outlet_name, domain=domain)
 
         # Update outlet_name if LLM found the official name
         if history.official_name:
@@ -493,10 +525,10 @@ class MediaProfiler:
             outlet_name = history.official_name
 
         logger.info("  - Researching ownership...")
-        ownership = self.researcher.research_ownership(outlet_name)
+        ownership = self.researcher.research_ownership(outlet_name, domain=domain)
 
         logger.info("  - Gathering external analyses...")
-        external_analyses = self.researcher.research_external_analysis(outlet_name)
+        external_analyses = self.researcher.research_external_analysis(outlet_name, domain=domain)
 
         # 5. Calculate overall scores
         bias_score = editorial_bias_result.bias_score if editorial_bias_result else 0.0
@@ -541,12 +573,19 @@ class MediaProfiler:
             sourcing_result=sourcing_result,
             pseudoscience_result=pseudoscience_result,
 
-            # Research results
+            # Research results — history
             history_summary=history.summary,
             founding_year=history.founding_year,
+            founder=history.founder,
+            original_name=history.original_name,
+            key_events=history.key_events or [],
+
+            # Research results — ownership
             owner=ownership.owner or ownership.parent_company,
+            parent_company=ownership.parent_company,
             funding_model=ownership.funding_model,
             headquarters=ownership.headquarters,
+            ownership_notes=ownership.notes if ownership.notes else None,
 
             # External analyses
             external_analyses=external_analyses.analyses,
@@ -596,14 +635,31 @@ class MediaProfiler:
         lines.append("-" * 40)
         if report.founding_year:
             lines.append(f"  Founded: {report.founding_year}")
+        if report.founder:
+            lines.append(f"  Founder(s): {report.founder}")
+        if report.original_name:
+            lines.append(f"  Original Name: {report.original_name}")
+        if report.key_events:
+            lines.append("  Key Events:")
+            for event in report.key_events:
+                lines.append(f"    - {event}")
+        if report.history_summary:
+            lines.append(f"\n  {report.history_summary}")
+        lines.append("")
+
+        # Ownership
+        lines.append("FUNDED BY / OWNERSHIP")
+        lines.append("-" * 40)
         if report.owner:
             lines.append(f"  Owner: {report.owner}")
+        if report.parent_company and report.parent_company != report.owner:
+            lines.append(f"  Parent Company: {report.parent_company}")
         if report.funding_model:
             lines.append(f"  Funding: {report.funding_model}")
         if report.headquarters:
             lines.append(f"  Headquarters: {report.headquarters}")
-        if report.history_summary:
-            lines.append(f"\n  {report.history_summary}")
+        if report.ownership_notes:
+            lines.append(f"\n  {report.ownership_notes}")
         lines.append("")
 
         # Bias Analysis
@@ -703,10 +759,11 @@ def research_outlet(url: str, outlet_name: Optional[str] = None) -> dict:
     """
     researcher = MediaResearcher()
     outlet_name = outlet_name or researcher._extract_outlet_name(url)
+    domain = researcher._extract_domain(url)
 
-    history = researcher.research_history(outlet_name)
-    ownership = researcher.research_ownership(outlet_name)
-    external = researcher.research_external_analysis(outlet_name)
+    history = researcher.research_history(outlet_name, domain=domain)
+    ownership = researcher.research_ownership(outlet_name, domain=domain)
+    external = researcher.research_external_analysis(outlet_name, domain=domain)
 
     return {
         "outlet_name": outlet_name,
