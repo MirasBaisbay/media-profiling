@@ -15,8 +15,10 @@ import logging
 import re
 from datetime import date, datetime
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
+import requests
+from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
 from langchain_openai import ChatOpenAI
 
@@ -124,6 +126,27 @@ Include up to 3-5 most relevant and credible analyses."""
         "youtube.com",
     }
 
+    # Common about page paths to try when scraping directly
+    ABOUT_PAGE_PATHS = [
+        "/about",
+        "/about-us",
+        "/about/",
+        "/about-us/",
+        "/corporate/about",
+        "/company/about",
+    ]
+
+    # HTTP headers to mimic a browser
+    _HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
     def __init__(
         self,
         model: str = "gpt-4o-mini",
@@ -145,6 +168,7 @@ Include up to 3-5 most relevant and credible analyses."""
         self.analysis_llm = get_llm(model, temperature).with_structured_output(
             ExternalAnalysisLLMOutput
         )
+        self.name_llm = get_llm(model, temperature)
         self.search = DDGS()
 
     def _extract_domain(self, url: str) -> str:
@@ -168,7 +192,102 @@ Include up to 3-5 most relevant and credible analyses."""
         domain = self._extract_domain(url)
         # Generate name from domain (e.g., "nytimes.com" -> "Nytimes")
         name = domain.split(".")[0]
-        return name.replace("-", " ").replace("_", " ").title()
+        name = name.replace("-", " ").replace("_", " ")
+        # Short names (<=4 chars) are likely acronyms — uppercase them (bbc -> BBC, cnn -> CNN, npr -> NPR)
+        if len(name) <= 4:
+            return name.upper()
+        return name.title()
+
+    def _scrape_about_page(self, domain: str) -> str:
+        """
+        Directly scrape the outlet's about page.
+
+        Tries common about page paths on the site itself.
+        This is preferred over web search because the outlet's own
+        about page is the most authoritative source for history/ownership.
+
+        Args:
+            domain: The outlet's domain (e.g., "bbc.com")
+
+        Returns:
+            About page text content, or empty string if not found
+        """
+        base_url = f"https://www.{domain}" if not domain.startswith("www.") else f"https://{domain}"
+
+        for path in self.ABOUT_PAGE_PATHS:
+            url = urljoin(base_url, path)
+            try:
+                resp = requests.get(url, headers=self._HEADERS, timeout=10, allow_redirects=True)
+                if resp.status_code == 200 and "text/html" in resp.headers.get("content-type", ""):
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    # Remove scripts/styles
+                    for tag in soup(["script", "style", "nav", "header", "footer"]):
+                        tag.decompose()
+                    text = soup.get_text(separator=" ", strip=True)
+                    # Only accept if it has meaningful content (not a redirect/error page)
+                    if len(text) > 200:
+                        logger.info(f"  - Found about page at {url}")
+                        return text[:5000]
+            except Exception as e:
+                logger.debug(f"  - About page fetch failed for {url}: {e}")
+                continue
+
+        return ""
+
+    def resolve_outlet_name(self, url: str, domain: str = "") -> str:
+        """
+        Resolve the official outlet name using URL heuristics + LLM fallback.
+
+        Strategy:
+        1. Extract name from URL (quick heuristic)
+        2. If the name looks like a raw domain slug (e.g., "apnews", "foxnews"),
+           scrape the about page and use LLM to extract the official name
+
+        Args:
+            url: The outlet's URL
+            domain: Optional domain for about page scraping
+
+        Returns:
+            Best available outlet name
+        """
+        domain = domain or self._extract_domain(url)
+        url_name = self._extract_outlet_name(url)
+        domain_base = domain.split(".")[0].lower()
+
+        # If the URL-derived name looks like a clean, recognizable name, use it
+        # Short names (acronyms like BBC, CNN, NPR) are already good
+        if len(domain_base) <= 4:
+            # Already handled as acronym — but still try LLM for official name
+            pass
+        # Check if name is a concatenated slug (no spaces, looks like domain slug)
+        # e.g., "apnews", "foxnews", "nytimes", "washingtonpost"
+        # These need LLM resolution to get "The Associated Press", "Fox News", etc.
+
+        # Try to get official name from the about page
+        about_text = self._scrape_about_page(domain)
+        if about_text:
+            try:
+                prompt = (
+                    f'What is the full, official name of the media organization at {domain}? '
+                    f'Based on this about page text, return ONLY the official name '
+                    f'(e.g., "The Associated Press" not "apnews", '
+                    f'"British Broadcasting Corporation" not "bbc", '
+                    f'"Fox News" not "foxnews"). '
+                    f'If you cannot determine it, return "{url_name}".\n\n'
+                    f'About page text:\n{about_text[:3000]}'
+                )
+                response = self.name_llm.invoke([
+                    {"role": "user", "content": prompt}
+                ])
+                official_name = response.content.strip().strip('"').strip("'")
+                # Sanity check: name should be reasonable length
+                if 2 < len(official_name) < 100:
+                    logger.info(f"  - Resolved outlet name: '{url_name}' -> '{official_name}'")
+                    return official_name
+            except Exception as e:
+                logger.warning(f"  - Outlet name resolution failed: {e}")
+
+        return url_name
 
     def _search(self, query: str, max_results: int = 5) -> str:
         """
@@ -203,26 +322,55 @@ Include up to 3-5 most relevant and credible analyses."""
             logger.warning(f"Search failed: {e}")
             return ""
 
-    def research_history(self, outlet_name: str) -> HistoryLLMOutput:
+    def research_history(self, outlet_name: str, domain: str = "") -> HistoryLLMOutput:
         """
         Research outlet history and founding information.
 
-        First tries to find "about us" pages from the outlet itself,
-        then falls back to Wikipedia if no results found.
+        Strategy (ordered by reliability):
+        1. Scrape the outlet's own about page directly
+        2. DuckDuckGo search for about/history pages
+        3. Wikipedia fallback
+        4. Broader domain-based search
 
         Args:
             outlet_name: Human-readable outlet name
+            domain: Optional domain for disambiguation (e.g., "bbc.com")
 
         Returns:
             HistoryLLMOutput with extracted history
         """
-        # First try: about us pages from the outlet itself
-        query = f'"{outlet_name}" about us founded history media news organization'
-        snippets = self._search(query)
+        snippets = ""
 
-        # Fallback to Wikipedia if no results
+        # Tier 1: Scrape the outlet's own about page directly
+        if domain:
+            about_text = self._scrape_about_page(domain)
+            if about_text:
+                snippets = about_text
+
+        # Tier 2: DuckDuckGo search for about/history pages
         if not snippets:
-            query = f'"{outlet_name}" wikipedia founded history media news organization'
+            name_variants = f'"{outlet_name}"'
+            if domain:
+                domain_base = domain.split(".")[0]
+                if domain_base.lower() != outlet_name.lower():
+                    name_variants = f'"{outlet_name}" OR "{domain_base}"'
+
+            query = f'{name_variants} about us founded history media news organization'
+            snippets = self._search(query)
+
+        # Tier 3: Wikipedia fallback
+        if not snippets:
+            name_variants = f'"{outlet_name}"'
+            if domain:
+                domain_base = domain.split(".")[0]
+                if domain_base.lower() != outlet_name.lower():
+                    name_variants = f'"{outlet_name}" OR "{domain_base}"'
+            query = f'{name_variants} wikipedia founded history media news organization'
+            snippets = self._search(query)
+
+        # Tier 4: Broader domain-based search
+        if not snippets and domain:
+            query = f'{domain} history founded owner media'
             snippets = self._search(query)
 
         if not snippets:
@@ -251,18 +399,24 @@ SEARCH RESULTS:
                 confidence=0.0
             )
 
-    def research_ownership(self, outlet_name: str) -> OwnershipLLMOutput:
+    def research_ownership(self, outlet_name: str, domain: str = "") -> OwnershipLLMOutput:
         """
         Research ownership and funding information.
 
         Args:
             outlet_name: Human-readable outlet name
+            domain: Optional domain for disambiguation
 
         Returns:
             OwnershipLLMOutput with extracted ownership info
         """
         query = f'"{outlet_name}" ownership owner parent company funded by headquarters'
         snippets = self._search(query)
+
+        # Fallback: include domain for broader search
+        if not snippets and domain:
+            query = f'{domain} ownership owner parent company funded by headquarters'
+            snippets = self._search(query)
 
         if not snippets:
             return OwnershipLLMOutput(
@@ -290,18 +444,24 @@ SEARCH RESULTS:
                 confidence=0.0
             )
 
-    def research_external_analysis(self, outlet_name: str) -> ExternalAnalysisLLMOutput:
+    def research_external_analysis(self, outlet_name: str, domain: str = "") -> ExternalAnalysisLLMOutput:
         """
         Research external analyses and criticism.
 
         Args:
             outlet_name: Human-readable outlet name
+            domain: Optional domain for disambiguation
 
         Returns:
             ExternalAnalysisLLMOutput with external analyses
         """
         query = f'"{outlet_name}" media bias analysis criticism review fact check rating'
         snippets = self._search(query, max_results=8)
+
+        # Fallback: include domain
+        if not snippets and domain:
+            query = f'{domain} media bias analysis criticism review fact check rating'
+            snippets = self._search(query, max_results=8)
 
         if not snippets:
             return ExternalAnalysisLLMOutput(
@@ -449,7 +609,9 @@ class MediaProfiler:
             ComprehensiveReportData with all analysis results
         """
         domain = self._extract_domain(url)
-        outlet_name = outlet_name or self.researcher._extract_outlet_name(url)
+        if not outlet_name:
+            logger.info("  - Resolving outlet name...")
+            outlet_name = self.researcher.resolve_outlet_name(url, domain=domain)
 
         logger.info(f"Profiling: {outlet_name} ({domain})")
 
@@ -485,7 +647,7 @@ class MediaProfiler:
 
         # 4. External research
         logger.info("  - Researching history...")
-        history = self.researcher.research_history(outlet_name)
+        history = self.researcher.research_history(outlet_name, domain=domain)
 
         # Update outlet_name if LLM found the official name
         if history.official_name:
@@ -493,10 +655,10 @@ class MediaProfiler:
             outlet_name = history.official_name
 
         logger.info("  - Researching ownership...")
-        ownership = self.researcher.research_ownership(outlet_name)
+        ownership = self.researcher.research_ownership(outlet_name, domain=domain)
 
         logger.info("  - Gathering external analyses...")
-        external_analyses = self.researcher.research_external_analysis(outlet_name)
+        external_analyses = self.researcher.research_external_analysis(outlet_name, domain=domain)
 
         # 5. Calculate overall scores
         bias_score = editorial_bias_result.bias_score if editorial_bias_result else 0.0
@@ -541,12 +703,19 @@ class MediaProfiler:
             sourcing_result=sourcing_result,
             pseudoscience_result=pseudoscience_result,
 
-            # Research results
+            # Research results — history
             history_summary=history.summary,
             founding_year=history.founding_year,
+            founder=history.founder,
+            original_name=history.original_name,
+            key_events=history.key_events or [],
+
+            # Research results — ownership
             owner=ownership.owner or ownership.parent_company,
+            parent_company=ownership.parent_company,
             funding_model=ownership.funding_model,
             headquarters=ownership.headquarters,
+            ownership_notes=ownership.notes if ownership.notes else None,
 
             # External analyses
             external_analyses=external_analyses.analyses,
@@ -596,14 +765,31 @@ class MediaProfiler:
         lines.append("-" * 40)
         if report.founding_year:
             lines.append(f"  Founded: {report.founding_year}")
+        if report.founder:
+            lines.append(f"  Founder(s): {report.founder}")
+        if report.original_name:
+            lines.append(f"  Original Name: {report.original_name}")
+        if report.key_events:
+            lines.append("  Key Events:")
+            for event in report.key_events:
+                lines.append(f"    - {event}")
+        if report.history_summary:
+            lines.append(f"\n  {report.history_summary}")
+        lines.append("")
+
+        # Ownership
+        lines.append("FUNDED BY / OWNERSHIP")
+        lines.append("-" * 40)
         if report.owner:
             lines.append(f"  Owner: {report.owner}")
+        if report.parent_company and report.parent_company != report.owner:
+            lines.append(f"  Parent Company: {report.parent_company}")
         if report.funding_model:
             lines.append(f"  Funding: {report.funding_model}")
         if report.headquarters:
             lines.append(f"  Headquarters: {report.headquarters}")
-        if report.history_summary:
-            lines.append(f"\n  {report.history_summary}")
+        if report.ownership_notes:
+            lines.append(f"\n  {report.ownership_notes}")
         lines.append("")
 
         # Bias Analysis
@@ -702,11 +888,12 @@ def research_outlet(url: str, outlet_name: Optional[str] = None) -> dict:
         Dict with history, ownership, and external analyses
     """
     researcher = MediaResearcher()
-    outlet_name = outlet_name or researcher._extract_outlet_name(url)
+    domain = researcher._extract_domain(url)
+    outlet_name = outlet_name or researcher.resolve_outlet_name(url, domain=domain)
 
-    history = researcher.research_history(outlet_name)
-    ownership = researcher.research_ownership(outlet_name)
-    external = researcher.research_external_analysis(outlet_name)
+    history = researcher.research_history(outlet_name, domain=domain)
+    ownership = researcher.research_ownership(outlet_name, domain=domain)
+    external = researcher.research_external_analysis(outlet_name, domain=domain)
 
     return {
         "outlet_name": outlet_name,

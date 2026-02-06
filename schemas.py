@@ -978,9 +978,25 @@ class ComprehensiveReportData(BaseModel):
         default=None,
         description="Year founded"
     )
+    founder: Optional[str] = Field(
+        default=None,
+        description="Founder(s) of the outlet"
+    )
+    original_name: Optional[str] = Field(
+        default=None,
+        description="Original name if different from current"
+    )
+    key_events: list[str] = Field(
+        default_factory=list,
+        description="Key events in the outlet's history"
+    )
     owner: Optional[str] = Field(
         default=None,
         description="Owner/parent company"
+    )
+    parent_company: Optional[str] = Field(
+        default=None,
+        description="Parent company if applicable"
     )
     funding_model: Optional[str] = Field(
         default=None,
@@ -989,6 +1005,10 @@ class ComprehensiveReportData(BaseModel):
     headquarters: Optional[str] = Field(
         default=None,
         description="Headquarters location"
+    )
+    ownership_notes: Optional[str] = Field(
+        default=None,
+        description="Additional notes about ownership/funding"
     )
 
     # External analyses

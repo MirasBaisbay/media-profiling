@@ -199,7 +199,11 @@ Credibility = FactCheck (40%) + Sourcing (30%) + Pseudoscience (30%)
 Main orchestrator combining web research with comprehensive profiling.
 
 **Components:**
-- `MediaResearcher` - Gathers history, ownership, and external analysis via web search
+- `MediaResearcher` - Gathers history, ownership, and external analysis via direct site scraping + web search
+  - **About page scraping**: Directly fetches `/about`, `/about-us` pages from the outlet
+  - **Outlet name resolution**: URL heuristics + LLM fallback for official names (e.g., `apnews` → `The Associated Press`)
+  - **Tiered research**: About page → DuckDuckGo search → Wikipedia → domain-based fallback
+  - **Social media blacklist**: Filters out Facebook, Twitter/X, Instagram, TikTok, Pinterest, LinkedIn, Reddit, YouTube from search results
 - `MediaProfiler` - Orchestrates all analyzers to produce MBFC-style reports
 
 ### refactored_analyzers.py - LLM-Based Analyzers
@@ -542,6 +546,89 @@ OUTPUT: PseudoscienceAnalysisResult
     └── confidence, reasoning
 ```
 
+### MediaResearcher - Outlet Name Resolution
+
+Resolves the official outlet name from URL with LLM fallback.
+
+```
+resolve_outlet_name(url, domain)
+    │
+    ├─► 1. URL Heuristic
+    │       ├─► Extract domain base: "bbc.com" → "bbc"
+    │       ├─► Short names (≤4 chars) → UPPERCASE: "bbc" → "BBC"
+    │       └─► Longer names → Title Case: "foxnews" → "Foxnews"
+    │
+    ├─► 2. About Page Scrape (LLM fallback)
+    │       ├─► Try: /about, /about-us, /about/, /about-us/,
+    │       │        /corporate/about, /company/about
+    │       ├─► Extract page text (up to 5000 chars)
+    │       └─► LLM extracts official name from about page
+    │           ├─► "apnews" → "The Associated Press"
+    │           ├─► "foxnews" → "Fox News"
+    │           └─► "nytimes" → "The New York Times"
+    │
+    └─► OUTPUT: Official outlet name (string)
+```
+
+### MediaResearcher - History Research
+
+Tiered approach to gathering outlet history information.
+
+```
+research_history(outlet_name, domain)
+    │
+    ├─► Tier 1: DIRECT ABOUT PAGE SCRAPE
+    │       ├─► Fetch /about, /about-us from the site itself
+    │       ├─► Most authoritative source for history/ownership
+    │       └─► Returns page text if found (>200 chars)
+    │
+    ├─► Tier 2: DUCKDUCKGO SEARCH
+    │       ├─► Query: "{outlet_name}" about us founded history
+    │       └─► Filters out social media via SEARCH_BLACKLIST
+    │
+    ├─► Tier 3: WIKIPEDIA FALLBACK
+    │       └─► Query: "{outlet_name}" wikipedia founded history
+    │
+    ├─► Tier 4: DOMAIN-BASED SEARCH
+    │       └─► Query: {domain} history founded owner media
+    │
+    └─► LLM Extraction → HistoryLLMOutput
+            ├─► official_name (used to update outlet name)
+            ├─► founding_year, founder
+            ├─► original_name (if different)
+            ├─► key_events: List[str]
+            ├─► summary: 2-3 sentence history
+            └─► confidence
+
+SEARCH BLACKLIST (filtered from all results):
+    facebook.com, twitter.com, x.com, instagram.com,
+    tiktok.com, pinterest.com, linkedin.com, reddit.com, youtube.com
+```
+
+### MediaResearcher - Ownership & External Analysis
+
+```
+research_ownership(outlet_name, domain)
+    │
+    ├─► Search: "{outlet_name}" ownership owner parent company funded by
+    ├─► Fallback: {domain} ownership owner parent company
+    └─► LLM Extraction → OwnershipLLMOutput
+            ├─► owner, parent_company
+            ├─► funding_model (advertising/subscription/public/nonprofit/mixed)
+            ├─► headquarters (city, country)
+            └─► notes, confidence
+
+research_external_analysis(outlet_name, domain)
+    │
+    ├─► Search: "{outlet_name}" media bias analysis criticism review
+    ├─► Targets: MBFC, Ad Fontes, NewsGuard, CJR, Nieman Lab
+    └─► LLM Extraction → ExternalAnalysisLLMOutput
+            └─► analyses: List[ExternalAnalysisItem]
+                    ├── source_name, source_url
+                    ├── summary
+                    └── sentiment: positive/negative/neutral/mixed
+```
+
 ---
 
 ## Propaganda Detection
@@ -713,8 +800,17 @@ QUICK SUMMARY
 HISTORY
 ----------------------------------------
   Founded: 1922
-  Owner: British Broadcasting Corporation
-  Funding: Public funding
+  Founder(s): John Reith
+  Key Events:
+    - First TV broadcasts 1936
+    - Charter renewal 2017
+
+  The BBC was founded in 1922 by John Reith...
+
+FUNDED BY / OWNERSHIP
+----------------------------------------
+  Owner: British Public
+  Funding: License Fee (public funding)
   Headquarters: London, United Kingdom
 
 BIAS ANALYSIS
@@ -776,9 +872,22 @@ media-profiling/
 │   └── PseudoscienceAnalyzer (LLM-based pseudoscience detection)
 │
 ├── research.py                  # Web research and profiling orchestrator
-│   ├── MediaResearcher (history, ownership, external analysis)
+│   ├── MediaResearcher (about page scraping, history, ownership, external analysis)
+│   │   ├── resolve_outlet_name() (URL heuristics + LLM about page fallback)
+│   │   ├── _scrape_about_page() (direct /about page fetch)
+│   │   ├── research_history() (tiered: about page → search → Wikipedia)
+│   │   ├── research_ownership() (search + domain fallback)
+│   │   └── research_external_analysis() (media watchdog search)
 │   ├── MediaProfiler (comprehensive analysis orchestrator)
 │   └── Convenience functions (research_outlet, profile_outlet)
+│
+├── main_pipeline.py             # Entry point: scrape → profile → generate → save
+│
+├── report_generator.py          # LLM-based MBFC prose report generation
+│   └── ReportGenerator (GPT-4o synthesis with structured prompting)
+│
+├── storage.py                   # Persistence layer (30-day cache)
+│   └── StorageManager (JSON + Markdown report caching)
 │
 ├── scraper.py                   # Web scraping for articles and metadata
 │   ├── MediaScraper
