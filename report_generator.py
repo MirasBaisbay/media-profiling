@@ -77,8 +77,11 @@ STRUCTURE & REQUIREMENTS:
 
 6. **Analysis / Bias**:
    - This is the main body. Discuss the editorial stance.
-   - Cite specific policy positions found in the data (e.g., "In reviewing articles, we found they support...").
-   - Mention word choice/loaded language findings.
+   - **MANDATORY**: You MUST list specific policy positions found in the 'editorial_bias_result.policy_positions' data.
+     For each position, write a sentence like: "On [domain], the outlet [leaning description]..."
+     Example: "On environmental issues, the outlet reports factually on climate science without advocacy."
+     Example: "On foreign policy, the outlet presents balanced coverage of international conflicts."
+   - If loaded language examples exist in 'loaded_language_examples', list them explicitly.
    - Mention external critiques found in the 'external_analyses' data.
 
 7. **Failed Fact Checks**:

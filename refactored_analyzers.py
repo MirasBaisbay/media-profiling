@@ -1622,7 +1622,14 @@ Note if the outlet appears to:
 4. Note use of loaded/emotional language
 5. Consider both explicit statements and implicit framing
 6. Be conservative - don't over-interpret ambiguous content
-7. Distinguish between NEWS reporting and OPINION pieces"""
+7. Distinguish between NEWS reporting and OPINION pieces
+
+## CRITICAL: ALWAYS POPULATE POLICY POSITIONS
+You MUST extract policy positions even when the outlet takes a neutral/balanced stance:
+- If an article discusses climate change factually without taking sides, output a PolicyPosition with domain="Environmental Policy", leaning="Center", and indicators like "Reports factually on climate science without advocacy."
+- If an article covers immigration policy neutrally, output a PolicyPosition with domain="Immigration", leaning="Center", and indicators describing the balanced framing.
+- Do NOT return an empty list for policy_positions unless the articles are entirely devoid of political or social topics (e.g., only sports scores or recipes).
+- For each major topic covered in the articles, create a PolicyPosition documenting the outlet's stance (which may be Center/balanced)."""
 
     def __init__(
         self,

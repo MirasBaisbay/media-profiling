@@ -87,7 +87,7 @@ class MediaScraper:
     def scrape_feed(self) -> List[Article]:
         """
         The Main Method called by profiler.py.
-        Strategy: Get homepage, find internal links, scrape them.
+        Strategy: Get homepage, find internal links, prioritize hard news, scrape them.
         """
         logger.info(f"Scraping homepage: {self.base_url}")
         soup = self.fetch_page(self.base_url)
@@ -100,35 +100,63 @@ class MediaScraper:
         for a in soup.find_all('a', href=True):
             href = a['href']
             full_url = urljoin(self.base_url, href)
-            
+
             # Filter logic
             if self.domain not in full_url: continue # Internal only
             if len(full_url) < len(self.base_url) + 10: continue # Too short
             # Skip obvious non-article pages
-            if any(x in full_url for x in ['/tag/', '/search/', '/category/', '/login', '.pdf', '.jpg']): continue
-            
+            if any(x in full_url for x in ['/tag/', '/search/', '/category/', '/login', '.pdf', '.jpg', '/video/', '/live/']): continue
+
             candidates.add(full_url)
 
-        logger.info(f"Found {len(candidates)} links on homepage. Scraping {self.max_articles} of them...")
+        logger.info(f"Found {len(candidates)} links on homepage.")
 
-        # 2. Scrape them in parallel
+        # 2. Prioritize hard news over soft news for better bias analysis
+        scored_candidates = []
+        for url in candidates:
+            score = 0
+            u = url.lower()
+
+            # Boost hard news sections
+            if any(x in u for x in ['/news', '/politics', '/world', '/business', '/economy',
+                                     '/uk-news', '/us-news', '/us-politics', '/global']):
+                score += 10
+
+            # Boost hard news keywords in URL slug
+            if any(x in u for x in ['government', 'election', 'war', 'senate', 'congress',
+                                      'parliament', 'law', 'court', 'policy', 'minister',
+                                      'president', 'military', 'conflict', 'protest']):
+                score += 5
+
+            # Demote soft news sections
+            if any(x in u for x in ['/sport', '/sports', '/culture', '/arts', '/travel',
+                                     '/food', '/style', '/entertainment', '/life', '/lifestyle',
+                                     '/celebrity', '/recipe', '/wellness', '/fitness',
+                                     '/music', '/movies', '/tv-shows', '/gaming']):
+                score -= 10
+
+            scored_candidates.append((score, url))
+
+        # Sort by score descending (hard news first)
+        scored_candidates.sort(key=lambda x: x[0], reverse=True)
+        target_links = [x[1] for x in scored_candidates[:self.max_articles * 2]]
+
+        top_score = scored_candidates[0][0] if scored_candidates else 0
+        logger.info(f"Prioritized {len(target_links)} links (top score: {top_score}). Scraping {self.max_articles}...")
+
+        # 3. Scrape them in parallel
         articles = []
         with ThreadPoolExecutor(max_workers=5) as executor:
-            # Take top candidates (shuffle slightly to avoid getting only header links)
-            target_links = list(candidates)
-            random.shuffle(target_links)
-            target_links = target_links[:self.max_articles * 2]
-            
             future_to_url = {executor.submit(self._parse_article, url): url for url in target_links}
-            
+
             for future in as_completed(future_to_url):
                 if len(articles) >= self.max_articles: break
-                
+
                 res = future.result()
                 if res and len(res.text) > 500: # Ensure valid article text
                     articles.append(res)
                     print(f"✅ Scraped: {res.title[:50]}...")
-        
+
         return articles
 
     def _parse_article(self, url: str) -> Optional[Article]:
