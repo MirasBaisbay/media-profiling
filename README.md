@@ -753,10 +753,129 @@ streamlit run app.py
 # Opens at http://localhost:8501
 ```
 
-**Deploy to HuggingFace Spaces:**
-1. Create a new Space with SDK: Streamlit
-2. Add `OPENAI_API_KEY` as a Space secret
-3. Push the repo — the `requirements.txt` handles dependencies
+### Deploy to HuggingFace Spaces
+
+Follow these steps to deploy Media Profiler as a public (or private) web app on HuggingFace Spaces.
+
+#### Step 1: Create a HuggingFace Account
+
+If you don't have one, sign up at [huggingface.co/join](https://huggingface.co/join).
+
+#### Step 2: Create a New Space
+
+1. Go to [huggingface.co/new-space](https://huggingface.co/new-space)
+2. Fill in the form:
+   - **Owner**: Your username or organization
+   - **Space name**: `media-profiler` (or any name you prefer)
+   - **License**: MIT (or your preferred license)
+   - **SDK**: Select **Streamlit**
+   - **Visibility**: Public or Private
+3. Click **Create Space**
+
+#### Step 3: Add Your OpenAI API Key as a Secret
+
+The app needs an OpenAI API key for LLM-based analysis. **Never commit your key to the repo.**
+
+1. Go to your Space's page: `https://huggingface.co/spaces/<your-username>/media-profiler`
+2. Click **Settings** (gear icon in the top-right)
+3. Scroll down to **Repository secrets**
+4. Click **New secret**:
+   - **Name**: `OPENAI_API_KEY`
+   - **Value**: Your OpenAI API key (e.g., `sk-...`)
+5. Click **Save**
+
+The app reads this automatically via `os.environ["OPENAI_API_KEY"]`.
+
+#### Step 4: Clone the Space and Push Your Code
+
+```bash
+# Option A: Clone the empty Space repo and copy files into it
+git clone https://huggingface.co/spaces/<your-username>/media-profiler
+cd media-profiler
+
+# Copy all project files into this directory
+# (app.py, requirements.txt, schemas.py, research.py, scraper.py, etc.)
+
+# Option B: Add the Space as a remote to your existing repo
+cd /path/to/your/media-profiling
+git remote add space https://huggingface.co/spaces/<your-username>/media-profiler
+```
+
+#### Step 5: Verify Required Files
+
+Make sure these files exist in the root of the repo:
+
+| File | Purpose |
+|------|---------|
+| `app.py` | Streamlit entry point (HuggingFace auto-detects this) |
+| `requirements.txt` | Python dependencies installed automatically |
+| `schemas.py` | Pydantic data models |
+| `research.py` | Research orchestrator |
+| `refactored_analyzers.py` | LLM-based analyzers |
+| `scraper.py` | Web scraper |
+| `report_generator.py` | Report prose generation |
+| `storage.py` | Report caching |
+| `config.py` | Configuration constants |
+| `known_media_types.csv` | Lookup table for media type classification |
+
+> **Note**: You do **not** need `main_pipeline.py`, `train_pipeline.py`, `local_detector.py`, `parser.py`, or the `datasets/` and `propaganda_models/` directories for the web interface. These are optional.
+
+#### Step 6: Push to HuggingFace
+
+```bash
+# If using Option A (cloned Space repo):
+git add .
+git commit -m "Deploy Media Profiler to HuggingFace Spaces"
+git push origin main
+
+# If using Option B (added as remote):
+git push space main
+```
+
+HuggingFace will automatically:
+1. Detect the Streamlit SDK from `requirements.txt`
+2. Install all dependencies
+3. Run `streamlit run app.py`
+4. Provide a public URL like `https://<your-username>-media-profiler.hf.space`
+
+#### Step 7: Verify the Deployment
+
+1. Go to `https://huggingface.co/spaces/<your-username>/media-profiler`
+2. Wait for the build to complete (first build takes 2-5 minutes)
+3. You should see the Media Profiler interface with:
+   - A sidebar with URL input and previous reports
+   - Landing page explaining the methodology
+4. Enter a URL (e.g., `https://www.bbc.com`) and click **Analyze**
+
+#### Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| **Build fails** | Check the **Logs** tab in your Space. Usually a missing dependency in `requirements.txt` |
+| **"OPENAI_API_KEY not set"** | Add the secret in Settings > Repository secrets (Step 3) |
+| **App crashes on analysis** | Check the Logs tab for Python tracebacks. Common issue: the LLM model name might need updating |
+| **Slow first analysis** | Normal — scraping + 7 LLM calls + research takes 2-5 minutes. Subsequent analyses use cache |
+| **"No articles found"** | Some sites block HuggingFace's IP range. Try a different news site |
+| **Space sleeps after inactivity** | Free Spaces sleep after ~48h. Upgrade to a persistent Space or just re-visit to wake it |
+
+#### Optional: Custom Space Configuration
+
+Create a `README.md` at the root of your Space repo with HuggingFace metadata (this replaces the project README for the Space):
+
+```yaml
+---
+title: Media Profiler
+emoji: 📰
+colorFrom: blue
+colorTo: indigo
+sdk: streamlit
+sdk_version: "1.30.0"
+app_file: app.py
+pinned: false
+---
+```
+
+This controls the Space's title, emoji, and SDK version on the HuggingFace directory.
 
 ### Command Line
 
